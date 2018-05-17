@@ -1,0 +1,131 @@
+
+bt_ica
+-------
+
+*** The followings are the program options ***
+
+Filename options
+  -in1: channel-1 filename
+  -in2: channel-2 filename
+  -out: prefix for separated signal filename
+  -mat, --matrices: output optimized filter filename
+
+Analysis options [default]
+  -ic,    --input-channel: the number of input channel[2]
+  -fs,    --sample-freq:   Sampling freqency [16000]
+  -fft,   --fftsize:       fft size. [1024]
+  -wsize, --window-size:   window size. [1024]
+
+ *** Note: FFT size must be power of 2. ***
+
+ICA options [default]
+  -init,  --init-matrix: initial matrix file for ICA [IDENTITY]
+    *******************************************************
+    Note: When you specify 'IDENTITY' using identity matrix, 
+    not filename 'IDENTITY'
+    *******************************************************
+  -mu,    --stepsize:    stepsize parameter [0.01]
+  -it,    --iteration:   the number of iteration [50]
+  -m1, -m2, ...:         microphone positions for DOA-based permuation solver [0,0.021]
+  --no-solve-perm:       no solving permutation [default]
+  --solve-perm-doa:      DOA-based solving permutation
+
+Others:
+  -q, --quiet:   silent mode
+  -h, --help:    show this help.
+  -v, --version: show version.
+
+$$$ Example $$$
+  
+  $ ./bt_ica/bt_ica -fs 16000 -fft 1024 -wsize 1024 -in1 mic.1 -in2 mic.2 --init-matrix ./init_matrix/NBF_45_N45.dat \
+    -it 100 -mu 0.05 -m1 0.00 -m2 0.021 --solve-perm-doa
+
+rt_ica
+-------
+
+*** Keyboard controll ***
+
+"rt_ica" can be controlled by user's keyboard input.
+Note that: CTRL-C(^C) is disabled in "rt_ica".
+Moreover, default mode is "THROUGH". When you want to hear
+the separated signal, hit '1' to enter the ICA mode.
+
+The following keyboard input is available:
+
+  'q':  exit program
+
+  '0':  THROUGH mode [default]:
+        This mode outputs the input, directly
+
+  '1':  ICA mode:
+        This mode outputs the separated signal, directly
+
+  'r':  Reset the unmixing matrix into initial value forcedly.
+
+  's':  Change the output source of the separated signal in ICA.
+        Change the output of the input channel in THROUGH mode.
+
+*** The followings are the program options ***
+
+Analysis options [default]
+  -fs,   --sample-freq:   Sampling freqency [16000]
+  -fft,  --fftsize:       FFT size. [512]
+
+ *** Note: FFT size must be power of 2. ***
+
+ICA options [default]
+  -init, --init-matrix:     initial matrix for ICA [IDENTITY]
+    *******************************************************
+    Note: When you specify 'IDENTITY' using identity matrix, 
+    not filename 'IDENTITY'
+    *******************************************************
+  -mu,   --stepsize:        stepsize parameter [0.01]
+  -m1, -m2, ...:            microphone positions for DOA based permutation solver [0,0.021]
+  -b,    --block-len:       one block size for ICA in second(s) [1.5].
+  -bt,   --block-pow-thres: block power threshold for ignoring that block [50].
+  -rb,   --reset-block:     reset matrix every specified blocks [200].
+  -it,   --iteration:       iterations for raw-input mode [60].
+  --solve-perm-doa:         solving permutation by DOA based method.
+  --solve-perm-power:       solving permutation by power based method.
+  --no-solve-perm:          no solving permutation [default]
+  --mode:                   default output mode [ICA]
+  --source:                 default target source index for ICA [0]
+
+I/O option:
+  -d, --device:  audio device[/dev/dsp]
+  -f, --input:   use specified multichannel raw file instead of audio device
+  -o, --output:  output to specified file instead of audio device
+
+Others:
+  -q, --quiet:        silent mode
+  -h, --help:         show this help.
+  -v, --version:      show version.
+
+$$$ Example $$$
+ 
+ $ ./rt_ica/rt_ica -fs 16000 -fft 512 --stepsize 0.5 -b 2 -bt 50.0 --device /dev/dsp --init-matrix init_matrix/NBF_45_N45_512.dat \
+   --mode ICA --source 1
+
+
+mk_nbf
+-------
+
+*** The followings are the program options ***
+
+  -fs,   --sample-freq:   Sampling freqency [16000]
+  -fft,  --fftsize:       FFT size. [1024]
+  -o,    --output:        Output filename [NBF.dat]
+  -p,    --pinv:          Using pseudo inverse for constructing null beamformer [no set]
+
+  -m1, -m2:               microphone positions for DOA based permutation solver [0,0.021]
+  -d1, -d2:               Null Directions [-45,45]
+
+  -q, --quiet:   silent mode
+  -h, --help:    show this help.
+  -v, --version: show version.
+
+$$$ Example $$$
+
+ $ ./mk_nbf/mk_nbf -d1 45 -d2 -45 -p -o NBF_45_N45_512.dat -fft 512 -m1 0 -m2 0.021 
+
+ 

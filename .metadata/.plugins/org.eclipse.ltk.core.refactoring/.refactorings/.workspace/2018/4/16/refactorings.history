@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Delete resource &apos;render/Debug/render.exe&apos;" deleteContents="false" description="Delete resource &apos;render/Debug/render.exe&apos;" element1="/render/Debug/render.exe" flags="7" id="org.eclipse.ltk.core.refactoring.delete.resources" resources="1" stamp="1523860998400"/>
+</session>

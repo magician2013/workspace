@@ -1,0 +1,44 @@
+/*
+ * test_vad.c
+ *
+ *  Created on: 2015年9月21日
+ *      Author: ite01527
+ */
+/*
+ * test_ns.c
+ *
+ *  Created on: 2015年8月26日
+ *      Author: ite01527
+ */
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+
+#include "digital_agc.h"
+#include "gain_control.h"
+#include "webrtc_vad.h"
+
+int main(int argc, char *argv[]) {
+	FILE *mic = fopen("train1.pcm", "rb");
+	FILE *pfile = fopen("nrout1.pcm", "wb");
+	int i, j;
+	short Sin[256];
+
+	VadInst *ns;
+	ns = WebRtcVad_Create();
+	WebRtcVad_Init(ns);
+	WebRtcVad_set_mode(ns, 2);
+	i = WebRtcVad_ValidRateAndFrameLength(8000, 80);
+	while (!feof(mic) && !i) {
+		fread(Sin, sizeof(short), 80, mic);
+		j = WebRtcVad_Process(ns, 8000, Sin, 80);
+		//assert(j == 1);
+		fwrite(&j, sizeof(int), 1, pfile);
+	}
+	WebRtcVad_Free(ns);
+
+	fclose(pfile);
+	fclose(mic);
+	system("pause");
+	return (0);
+}

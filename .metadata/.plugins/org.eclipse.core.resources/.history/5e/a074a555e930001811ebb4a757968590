@@ -1,0 +1,601 @@
+/*
+ * Copyright (c) 2006, Creative Labs Inc.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided
+ * that the following conditions are met:
+ *
+ *     * Redistributions of source code must retain the above copyright notice, this list of conditions and
+ * 	     the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright notice, this list of conditions
+ * 	     and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ *     * Neither the name of Creative Labs Inc. nor the names of its contributors may be used to endorse or
+ * 	     promote products derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+ * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+ * TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+#include <assert.h>
+#include <cmath>
+#include <iostream>
+#include <vector>
+#include <pthread.h>
+#include "Framework.h"
+#include "mfcc.h"
+#include "em_gmm.h"
+extern "C" {
+#include "rfft_256.h"
+#include "webrtc_vad.h"
+}
+#define	OUTPUT_WAVE_FILE "Capture.wav"
+#define FrameLen (80)
+#define BUFFERSIZE	(4*(FrameLen))
+#define NUMBUFFERS	(8)
+VadInst *ns = NULL;
+
+Word16 *hann240 = (Word16[] ) { 2621, 2627, 2642, 2668, 2705, 2751, 2808, 2876,
+				2953, 3041, 3139, 3247, 3365, 3493, 3631, 3778, 3935, 4102,
+				4278, 4463, 4657, 4861, 5073, 5294, 5523, 5761, 6007, 6262,
+				6524, 6794, 7071, 7356, 7648, 7947, 8252, 8564, 8883, 9207,
+				9538, 9874, 10215, 10562, 10913, 11269, 11630, 11995, 12364,
+				12736, 13112, 13491, 13873, 14257, 14644, 15033, 15424, 15817,
+				16211, 16605, 17001, 17397, 17793, 18189, 18585, 18980, 19375,
+				19768, 20160, 20550, 20938, 21324, 21707, 22087, 22465, 22839,
+				23210, 23577, 23939, 24298, 24652, 25001, 25345, 25683, 26017,
+				26344, 26666, 26981, 27290, 27592, 27887, 28176, 28457, 28730,
+				28997, 29255, 29505, 29747, 29981, 30206, 30423, 30631, 30829,
+				31019, 31200, 31371, 31533, 31685, 31828, 31960, 32083, 32196,
+				32299, 32392, 32475, 32547, 32610, 32662, 32703, 32734, 32755,
+				32766 };
+
+#pragma pack (push,1)
+typedef struct {
+	char szRIFF[4];
+	long lRIFFSize;
+	char szWave[4];
+	char szFmt[4];
+	long lFmtSize;
+	WAVEFORMATEX wfex;
+	char szData[4];
+	long lDataSize;
+} WAVEHEADER;
+#pragma pack (pop)
+
+ica_state ica_status;
+pthread_mutex_t mxq1, mxq2, mxq3;
+sig_atomic_t isEmpty = 0;
+FILE *pFiles;
+float sample_data[12 * 2048]; //trained-i
+float test_data[12 * 512];
+
+typedef struct {
+	RingBuffer *ringbuffer1;
+	RingBuffer *ringbuffer2;
+} ARGs;
+
+typedef struct {
+	RingBuffer *ringbuffer;
+	FILE* *pFile;
+} ARGv;
+
+typedef union {
+	unsigned int a;
+	struct { //anonymous-struct
+		unsigned int low :16;
+		unsigned int high :16;
+	};
+} u32;
+
+void Emphasis(Word16 *audio_frame, Word16 *out_frame) {
+	static Word16 prev_frame[2 * FrameLen];
+	Word16 AudioFrame[FrameLen];
+	Word16 const alpha(31785);
+	memmove(prev_frame, prev_frame + FrameLen, FrameLen * sizeof(Word16));
+	memmove(prev_frame + FrameLen, audio_frame, FrameLen * sizeof(Word16));
+
+	for (int i = 0; i < FrameLen; i += 1) {
+		register Word32 L_var_out;
+		L_var_out = alpha * prev_frame[i + FrameLen - 1];
+		L_var_out = audio_frame[i] - ((L_var_out + 0x4000) >> 15);
+		if (L_var_out >> 15 != L_var_out >> 31) {
+			L_var_out = 0x7fff ^ L_var_out >> 31;
+		}
+		AudioFrame[i] = L_var_out;
+	}
+	memmove(out_frame, AudioFrame, FrameLen * sizeof(Word16));
+}
+
+void mfcc(short *audio_frame, float *dcts) {
+	Word16 b_expnt = 0;
+	Word16 FFT_Buffer[256];
+	static Word16 prev_frames[240];
+	UWord32 Magnitude[129];
+	UWord32 FBE[20];
+	float fbes[20];
+	float tmp32no1;
+
+	memmove(prev_frames, prev_frames + 80, 160 * sizeof(Word16));
+	memmove(prev_frames + 160, audio_frame, 80 * sizeof(Word16));
+	memset(FFT_Buffer + 240, 0, 16 * sizeof(Word16));
+	for (int i = 0; i < 120; i += 1) {
+		FFT_Buffer[i] = prev_frames[i] * hann240[i] >> 15;
+		FFT_Buffer[i + 120] = prev_frames[i + 120] * hann240[119 - i] >> 15;
+	}
+
+	b_expnt = Real_FFT(reinterpret_cast<ComplexInt16*>(FFT_Buffer), 8);
+
+	Magnitude[0] = FFT_Buffer[0] * FFT_Buffer[0];
+	tmp32no1 = Magnitude[0] * std::pow(2.f, 2 * b_expnt);
+	for (int i = 1; i < 128; i += 1) {
+		Word16 tmp16no1, tmp16no2;
+		register UWord32 L_var_out = 0;
+
+		tmp16no1 = reinterpret_cast<ComplexInt16*>(FFT_Buffer)[i].real;
+		tmp16no2 = reinterpret_cast<ComplexInt16*>(FFT_Buffer)[i].imag;
+		L_var_out = tmp16no1 * tmp16no1, L_var_out += tmp16no2 * tmp16no2;
+		Magnitude[i] = L_var_out;
+		tmp32no1 = L_var_out * std::pow(2.f, 2 * b_expnt);
+	}
+	Magnitude[128] = FFT_Buffer[1] * FFT_Buffer[1];
+	tmp32no1 = Magnitude[128] * std::pow(2.f, 2 * b_expnt);
+
+	for (int i = 0; i < 20; i += 1) {
+		UWord64 L_var_out = 0;
+		for (int j = 0; j < 129; j += 1) {
+			L_var_out += (UWord64) Magnitude[j] * HH[i][j];
+		}
+		FBE[i] = (L_var_out + 0x4000) >> 15;
+		fbes[i] = 0.5f * std::log10(FBE[i]) + log10(2) * (b_expnt - 15);
+	}
+
+	for (int i = 0; i < 13; i += 1) {
+		tmp32no1 = 0;
+		for (int j = 0; j < 20; j += 1) {
+			tmp32no1 += fbes[j] * DCT[i][j];
+		}
+		tmp32no1 /= 32768.f;
+		dcts[i] = tmp32no1 * lifter[i] / 1024.f;
+	}
+}
+
+void *thread_funcs1(void *args) {
+	RingBuffer *ringbuffer1 = reinterpret_cast<ARGs*>(args)->ringbuffer1;
+	RingBuffer *ringbuffer2 = reinterpret_cast<ARGs*>(args)->ringbuffer2;
+	u32 pData[FrameLen];
+	ALushort bufferL[FrameLen];
+	ALushort bufferR[FrameLen];
+	ALint valid = 0;
+	ALint nCount = 0;
+	std::vector<float> dcts(13);
+
+	FILE *pFile1 = fopen("wghts", "a+");
+	FILE *pFile2 = fopen("means", "a+");
+	FILE *pFile3 = fopen("diag_covs", "a+");
+
+	std::vector<float> weights(64);
+	std::vector<float> means(64 * 12);
+	std::vector<float> diag_covs(64 * 12);
+
+	while (!isEmpty) {
+		bool flag;
+		u32 const *data_ptr;
+		pthread_mutex_lock(&mxq1);
+		flag = (WebRtc_available_read(ringbuffer1) >= FrameLen);
+		pthread_mutex_unlock(&mxq1);
+		if (flag) {
+			pthread_mutex_lock(&mxq1);
+			WebRtc_ReadBuffer(ringbuffer1, (void**) &data_ptr, pData,
+			FrameLen);
+			pthread_mutex_unlock(&mxq1);
+			if (data_ptr != pData)
+				memmove(pData, data_ptr, BUFFERSIZE);
+			for (ALint i = 0; i < FrameLen; i += 1) {
+				bufferL[i] = pData[i].low;
+				bufferR[i] = pData[i].high;
+			}
+			/*ICA_Separation((short*) bufferL, (short*) bufferR, (short*) bufferL,
+			 (short*) bufferR, &ica_status);*/
+			for (ALint i = 0; i < FrameLen; i += 1) {
+				pData[i].low = bufferL[i];
+				pData[i].high = bufferR[i];
+			}
+			pthread_mutex_lock(&mxq2);
+			WebRtc_WriteBuffer(ringbuffer2, pData, FrameLen);
+			pthread_mutex_unlock(&mxq2);
+
+			valid = WebRtcVad_Process(ns, 8000, (short const*) bufferL,
+			FrameLen);
+			if (valid && nCount < 2048) {
+				Emphasis((short*) bufferL, (short*) bufferL);
+				mfcc((short*) bufferL, dcts.data());
+				memmove(sample_data + 12 * nCount, &dcts[1],
+						12 * sizeof(float));
+				nCount += 1;
+				if (2048 == nCount) {
+					em_gmm(sample_data, 2048, 12, 64, means.data(),
+							diag_covs.data(), weights.data(),
+							false /*diagonal gaussians*/);
+					for (ALint i = 0; i < 64 * 12; i += 1) {
+						fwrite(&means[i], sizeof(float), 1, pFile2);
+						fwrite(&diag_covs[i], sizeof(float), 1, pFile3);
+					}
+					for (ALint i = 0; i < 64; i += 1) {
+						fwrite(&weights[i], sizeof(float), 1, pFile1);
+					}
+				}
+				printf("Valid-Frames_%d\r", nCount);
+			}
+		}
+	}
+	fclose(pFile1);
+	fclose(pFile2);
+	fclose(pFile3);
+	return (NULL);
+}
+
+void *thread_funcs2(void *args) {
+	RingBuffer *ringbuffer = reinterpret_cast<ARGv*>(args)->ringbuffer;
+	FILE *pFile = reinterpret_cast<ARGv*>(args)->pFile[0];
+	ALuint uiBuffers[NUMBUFFERS];
+	ALuint uiSource;
+	ALuint uiBuffer;
+	ALint iState;
+	ALint iLoop;
+	ALint iBuffersProcessed, iQueuedBuffers;
+	u32 pData[FrameLen];
+	ALint iDataSize = 0;
+	ALint iSize;
+
+	memset(pData, 0, BUFFERSIZE);
+	alGenBuffers(NUMBUFFERS, uiBuffers);
+	alGenSources(1, &uiSource);
+
+	for (iLoop = 0; iLoop < NUMBUFFERS; iLoop++) {
+		alBufferData(uiBuffers[iLoop], AL_FORMAT_STEREO16, pData,
+		BUFFERSIZE, 8000);
+		alSourceQueueBuffers(uiSource, 1, &uiBuffers[iLoop]);
+	}
+
+	alSourcePlay(uiSource);
+
+	while (!isEmpty) {
+		iBuffersProcessed = 0;
+		alGetSourcei(uiSource, AL_BUFFERS_PROCESSED, &iBuffersProcessed);
+
+		while (iBuffersProcessed) {
+			while (!isEmpty) {
+				bool flag;
+				u32 const *data_ptr;
+				pthread_mutex_lock(&mxq2);
+				flag = (WebRtc_available_read(ringbuffer) >= FrameLen);
+				pthread_mutex_unlock(&mxq2);
+				if (flag) {
+					pthread_mutex_lock(&mxq2);
+					WebRtc_ReadBuffer(ringbuffer, (void**) &data_ptr, pData,
+					FrameLen);
+					pthread_mutex_unlock(&mxq2);
+					if (data_ptr != pData)
+						memmove(pData, data_ptr, BUFFERSIZE);
+					fwrite(pData, sizeof(u32), FrameLen, pFile);
+					iDataSize += BUFFERSIZE;
+					break;
+				} else {
+					Sleep(0);
+				}
+			}
+			uiBuffer = 0;
+			alSourceUnqueueBuffers(uiSource, 1, &uiBuffer);
+			alBufferData(uiBuffer, AL_FORMAT_STEREO16, pData,
+			BUFFERSIZE, 8000);
+			alSourceQueueBuffers(uiSource, 1, &uiBuffer);
+			iBuffersProcessed--;
+		}
+
+		alGetSourcei(uiSource, AL_SOURCE_STATE, &iState);
+		if (iState != AL_PLAYING) {
+			// If there are Buffers in the Source Queue then the Source was starved of audio
+			// data, so needs to be restarted (because there is more audio data to play)
+			printf("hello\n");
+			alGetSourcei(uiSource, AL_BUFFERS_QUEUED, &iQueuedBuffers);
+			if (iQueuedBuffers) {
+				alSourcePlay(uiSource);
+			} else {
+				// Finished playing
+				//break;
+			}
+		}
+	}
+	iSize = iDataSize + sizeof(WAVEHEADER) - 8;
+	fseek(pFile, 4, SEEK_SET);
+	fwrite(&iSize, 4, 1, pFile);
+	fseek(pFile, 42, SEEK_SET);
+	fwrite(&iDataSize, 4, 1, pFile);
+	fclose(pFile);
+
+	alSourceStop(uiSource);
+	alSourcei(uiSource, AL_BUFFER, 0);
+	alDeleteSources(1, &uiSource);
+	alDeleteBuffers(NUMBUFFERS, uiBuffers);
+	return (NULL);
+}
+
+void *thread_funcs3(void *args) {
+	RingBuffer *ringbuffer1 = reinterpret_cast<ARGs*>(args)->ringbuffer1;
+	RingBuffer *ringbuffer2 = reinterpret_cast<ARGs*>(args)->ringbuffer2;
+	ALshort bufferL[FrameLen];
+	ALshort bufferR[FrameLen];
+	u32 pData[FrameLen];
+	ALint valid = 0, nCount = 0;
+
+	std::vector<float> weights(64);
+	std::vector<float> means(64 * 12);
+	std::vector<float> diag_covs(64 * 12);
+	std::vector<float> dcts(13);
+
+	while (!isEmpty) {
+		bool flag;
+		u32 const *data_ptr;
+
+		flag = (WebRtc_available_read(ringbuffer1) >= FrameLen);
+		if (flag) {
+			pthread_mutex_lock(&mxq1);
+			WebRtc_ReadBuffer(ringbuffer1, (void**) &data_ptr, pData, FrameLen);
+			pthread_mutex_unlock(&mxq1);
+			if (data_ptr != pData) {
+				memmove(pData, data_ptr, BUFFERSIZE);
+			}
+			for (ALint i = 0; i < FrameLen; i += 1) {
+				bufferL[i] = pData[i].low;
+				bufferR[i] = pData[i].high;
+			}
+			valid = WebRtcVad_Process(ns, 8000, (const short*) bufferL, 80);
+			if (valid && nCount < 512) {
+				Emphasis((short*) bufferL, (short*) bufferL);
+				mfcc((short*) bufferL, dcts.data());
+				memmove(test_data+12*nCount,&dcts[1],);
+				nCount += 1;
+			}
+		} else {
+			Sleep(0);
+		}
+
+	}
+
+}
+
+int main() {
+	ALCdevice *pDevice;
+	ALCcontext *pContext;
+	ALCdevice *pCaptureDevice;
+	const ALCchar *szDefaultCaptureDevice;
+	ALint iSamplesAvailable;
+	FILE *pFile, *qFile, *uFile;
+	ALchar Buffer[BUFFERSIZE];
+	WAVEHEADER sWaveHeader;
+	ALint iDataSize = 0;
+	ALint iSize;
+	ALint err1, err2, err3;
+	pthread_t pid1, pid2, pid3;
+	RingBuffer *ringbuffer1, *ringbuffer2;
+	ns = WebRtcVad_Create();
+	WebRtcVad_Init(ns);
+	WebRtcVad_set_mode(ns, 2);
+	assert(0 == WebRtcVad_ValidRateAndFrameLength(8000, 80));
+
+	ringbuffer1 = WebRtc_CreateBuffer(BUFFERSIZE, sizeof(u32));
+	ringbuffer2 = WebRtc_CreateBuffer(BUFFERSIZE, sizeof(u32));
+
+	ARG arg = { .ica_config = &ica_status, .mx = &mxq3 };
+	qFile = fopen("mfccs", "wb");
+	ARGs args = { .ringbuffer1 = ringbuffer1, .ringbuffer2 = ringbuffer2 };
+	uFile = fopen("BSS_Processed.wav", "wb");
+	ARGv argv = { .ringbuffer = ringbuffer2, .pFile = &uFile };
+
+	pthread_mutex_init(&mxq1, NULL);
+	pthread_mutex_init(&mxq2, NULL);
+	pthread_mutex_init(&mxq3, NULL);
+	pthread_mutex_lock(&mxq3);
+
+	ICA_SeparateInit(&ica_status);
+
+// NOTE : This code does NOT setup the Wave Device's Audio Mixer to select a recording input
+// or a recording level.
+
+// Initialize Framework
+
+#if 0
+	{
+		FILE *cFile = fopen("test_stream", "rb");
+		FILE *vFile = fopen("test_stream1", "rb");
+		FILE *pFile = fopen("outputs_channel1", "wb");
+		FILE *kFile = fopen("outputs_channel2", "wb");
+		pFiles = fopen("debug_log", "wb");
+		while (!feof(cFile) && !feof(vFile)) {
+			float dcts[13];
+			short bufferL[FrameLen];
+			short bufferR[FrameLen];
+			fread(bufferL, sizeof(short), FrameLen, cFile);
+			fread(bufferR, sizeof(short), FrameLen, vFile);
+
+			//ICA_Separation(bufferL, bufferR, bufferL, bufferR, &ica_status);
+			Emphasis(bufferL, bufferL);
+			mfcc(bufferL, dcts);
+			fwrite(dcts, sizeof(float), 13, qFile);
+			fwrite(bufferL, FrameLen, sizeof(short), pFile);
+			fwrite(bufferR, FrameLen, sizeof(short), kFile);
+		}
+		fclose(cFile);
+		fclose(vFile);
+		fclose(pFiles);
+		fclose(kFile);
+		system("pause");
+		return (0);
+	}
+#endif
+
+	ALFWInit();
+
+	ALFWprintf("Capture Application\n");
+
+	if (!ALFWInitOpenAL()) {
+		ALFWprintf("Failed to initialize OpenAL\n");
+		ALFWShutdown();
+		return 0;
+	}
+
+	err1 = pthread_create(&pid1, NULL, thread_funcs1, (void*) &args);
+	err2 = pthread_create(&pid2, NULL, thread_funcs2, (void*) &argv);
+//err3 = pthread_create(&pid3, NULL, pca_ica_thread_func, (void*) &arg);
+	assert(err1 == 0);
+	assert(err2 == 0);
+	assert(err3 == 0);
+
+// Check for Capture Extension support
+	pContext = alcGetCurrentContext();
+	pDevice = alcGetContextsDevice(pContext);
+	if (alcIsExtensionPresent(pDevice, "ALC_EXT_CAPTURE") == AL_FALSE) {
+		ALFWprintf("Failed to detect Capture Extension\n");
+		ALFWShutdownOpenAL();
+		ALFWShutdown();
+		return 0;
+	}
+
+// Get list of available Capture Devices
+	const ALchar *pDeviceList = alcGetString(NULL,
+	ALC_CAPTURE_DEVICE_SPECIFIER);
+	if (pDeviceList) {
+		ALFWprintf("\nAvailable Capture Devices are:-\n");
+
+		while (*pDeviceList) {
+			ALFWprintf("%s\n", pDeviceList);
+			pDeviceList += strlen(pDeviceList) + 1;
+		}
+	}
+
+// Get the name of the 'default' capture device
+	szDefaultCaptureDevice = alcGetString(NULL,
+	ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER);
+	ALFWprintf("\nDefault Capture Device is '%s'\n\n", szDefaultCaptureDevice);
+
+// Open the default Capture device to record a 22050Hz 16bit Mono Stream using an internal buffer
+// of BUFFERSIZE Samples (== BUFFERSIZE * 2 bytes)
+	pCaptureDevice = alcCaptureOpenDevice(szDefaultCaptureDevice, 8000,
+	AL_FORMAT_STEREO16, BUFFERSIZE);
+	if (pCaptureDevice) {
+		ALFWprintf("Opened '%s' Capture Device\n\n",
+				alcGetString(pCaptureDevice,
+				ALC_CAPTURE_DEVICE_SPECIFIER));
+
+		// Create / open a file for the captured data
+		pFile = fopen(OUTPUT_WAVE_FILE, "wb");
+
+		// Prepare a WAVE file header for the captured data
+		sprintf(sWaveHeader.szRIFF, "RIFF");
+		sWaveHeader.lRIFFSize = 0;
+		sprintf(sWaveHeader.szWave, "WAVE");
+		sprintf(sWaveHeader.szFmt, "fmt");
+		sWaveHeader.lFmtSize = sizeof(WAVEFORMATEX);
+		sWaveHeader.wfex.nChannels = 2;
+		sWaveHeader.wfex.wBitsPerSample = 16;
+		sWaveHeader.wfex.wFormatTag = WAVE_FORMAT_PCM;
+		sWaveHeader.wfex.nSamplesPerSec = 8000;
+		sWaveHeader.wfex.nBlockAlign = sWaveHeader.wfex.nChannels
+				* sWaveHeader.wfex.wBitsPerSample / 8;
+		sWaveHeader.wfex.nAvgBytesPerSec = sWaveHeader.wfex.nSamplesPerSec
+				* sWaveHeader.wfex.nBlockAlign;
+		sWaveHeader.wfex.cbSize = 0;
+		sprintf(sWaveHeader.szData, "data");
+		sWaveHeader.lDataSize = 0;
+
+		fwrite(&sWaveHeader, sizeof(WAVEHEADER), 1, pFile);
+		fwrite(&sWaveHeader, sizeof(WAVEHEADER), 1, uFile);
+
+		// Start audio capture
+		alcCaptureStart(pCaptureDevice);
+		// Record for two seconds or until a key is pressed
+		DWORD dwStartTime = timeGetTime();
+		while (!ALFWKeyPress() && (timeGetTime() <= (dwStartTime + 65536))) {
+			// Release some CPU time ...
+			Sleep(0);
+			// Find out how many samples have been captured
+			alcGetIntegerv(pCaptureDevice, ALC_CAPTURE_SAMPLES, 1,
+					&iSamplesAvailable);
+
+			//ALFWprintf("Samples available : %d\r", iSamplesAvailable);
+
+			// When we have enough data to fill our BUFFERSIZE byte buffer, grab the samples
+			if (iSamplesAvailable
+					> (BUFFERSIZE / sWaveHeader.wfex.nBlockAlign)) {
+				// Consume Samples
+				alcCaptureSamples(pCaptureDevice, Buffer,
+				BUFFERSIZE / sWaveHeader.wfex.nBlockAlign);
+				pthread_mutex_lock(&mxq1);
+				WebRtc_WriteBuffer(ringbuffer1, Buffer, FrameLen);
+				pthread_mutex_unlock(&mxq1);
+				fwrite(Buffer, BUFFERSIZE, 1, pFile);
+				// Record total amount of data recorded
+				iDataSize += BUFFERSIZE;
+			}
+		}
+
+		// Stop capture
+		alcCaptureStop(pCaptureDevice);
+
+		// Check if any Samples haven't been consumed yet
+		alcGetIntegerv(pCaptureDevice, ALC_CAPTURE_SAMPLES, 1,
+				&iSamplesAvailable);
+		while (iSamplesAvailable) {
+			if (iSamplesAvailable
+					> (BUFFERSIZE / sWaveHeader.wfex.nBlockAlign)) {
+				alcCaptureSamples(pCaptureDevice, Buffer,
+				BUFFERSIZE / sWaveHeader.wfex.nBlockAlign);
+				fwrite(Buffer, BUFFERSIZE, 1, pFile);
+				iSamplesAvailable -=
+						(BUFFERSIZE / sWaveHeader.wfex.nBlockAlign);
+				iDataSize += BUFFERSIZE;
+			} else {
+				alcCaptureSamples(pCaptureDevice, Buffer, iSamplesAvailable);
+				fwrite(Buffer, iSamplesAvailable * sWaveHeader.wfex.nBlockAlign,
+						1, pFile);
+				iDataSize += iSamplesAvailable * sWaveHeader.wfex.nBlockAlign;
+				iSamplesAvailable = 0;
+			}
+		}
+
+		// Fill in Size information in Wave Header
+		fseek(pFile, 4, SEEK_SET);
+		iSize = iDataSize + sizeof(WAVEHEADER) - 8;
+		fwrite(&iSize, 4, 1, pFile);
+		fseek(pFile, 42, SEEK_SET);
+		fwrite(&iDataSize, 4, 1, pFile);
+		fclose(pFile);
+
+		ALFWprintf("\nSaved captured audio data to '%s'\n",
+		OUTPUT_WAVE_FILE);
+
+		// Close the Capture Device
+		alcCaptureCloseDevice(pCaptureDevice);
+	}
+
+	isEmpty = 1;
+	pthread_join(pid1, NULL);
+	pthread_join(pid2, NULL);
+	pthread_mutex_unlock(&mxq3);
+//pthread_join(pid3, NULL);
+	printf("done\n");
+// Close down OpenAL
+	WebRtcVad_Free(ns);
+	ALFWShutdownOpenAL();
+
+// Close down the Framework
+	ALFWShutdown();
+	fclose(qFile);
+
+	return 0;
+}

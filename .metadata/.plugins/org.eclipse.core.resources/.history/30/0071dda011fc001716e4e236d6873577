@@ -1,0 +1,1282 @@
+/*
+ * dft_filter_bank.c
+ *
+ *  Created on: 2015¦~3¤ë23¤é
+ *      Author: ite01527
+ */
+
+#include "type_def.h"
+#include "basic_op.h"
+#include "dft_filt_bank.h"
+
+#ifdef DEBUG
+#define WRITE(src, size, count, p_file) fwrite((src), (size), (count), (p_file))
+#else
+#define WRITE(src, size, count, p_file) ;
+#endif
+
+static Word64 alpha = 64ll;
+
+#ifndef DUAL_BAND
+static Word16 hann_win[144] = {12, 9, 15, 23, 31, 39, 47, 54, 58, 59, 55, 46, 30, 8,
+	-21, -56, -96, -140, -185, -227, -265, -294, -310, -310, -290, -249,
+	-184, -95, 16, 147, 293, 448, 603, 751, 879, 979, 1038, 1048, 1000, 887,
+	707, 458, 145, -225, -640, -1083, -1534, -1969, -2363, -2689, -2917,
+	-3021, -2976, -2760, -2357, -1756, -953, 49, 1238, 2595, 4094, 5699,
+	7372, 9067, 10739, 12338, 13815, 15127, 16230, 17091, 17681, 17980,
+	17980, 17681, 17091, 16230, 15127, 13815, 12338, 10739, 9067, 7372,
+	5699, 4094, 2595, 1238, 49, -953, -1756, -2357, -2760, -2976, -3021,
+	-2917, -2689, -2363, -1969, -1534, -1083, -640, -225, 145, 458, 707,
+	887, 1000, 1048, 1038, 979, 879, 751, 603, 448, 293, 147, 16, -95, -184,
+	-249, -290, -310, -310, -294, -265, -227, -185, -140, -96, -56, -21, 8,
+	30, 46, 55, 59, 58, 54, 47, 39, 31, 23, 15, 9, 12}; // Q18
+#else
+static Word16 hann_win[264] = { 89, 19, 21, 23, 25, 26, 27, 28, 27, 26, 25, 22,
+		18, 13, 8, 1, -8, -17, -28, -39, -52, -66, -80, -96, -111, -127, -142,
+		-158, -172, -185, -197, -207, -215, -220, -222, -221, -216, -207, -193,
+		-175, -152, -124, -91, -54, -11, 36, 88, 144, 203, 265, 329, 395, 461,
+		526, 591, 652, 709, 762, 808, 847, 877, 897, 906, 902, 885, 855, 809,
+		748, 671, 579, 470, 345, 206, 51, -116, -296, -487, -686, -892, -1103,
+		-1316, -1528, -1736, -1937, -2127, -2304, -2465, -2604, -2719, -2807,
+		-2864, -2887, -2873, -2818, -2721, -2579, -2390, -2153, -1866, -1528,
+		-1141, -702, -214, 322, 905, 1533, 2202, 2910, 3652, 4425, 5224, 6043,
+		6879, 7724, 8574, 9421, 10261, 11086, 11891, 12670, 13415, 14122, 14785,
+		15398, 15957, 16456, 16892, 17261, 17560, 17786, 17938, 18015, 18015,
+		17938, 17786, 17560, 17261, 16892, 16456, 15957, 15398, 14785, 14122,
+		13415, 12670, 11891, 11086, 10261, 9421, 8574, 7724, 6879, 6043, 5224,
+		4425, 3652, 2910, 2202, 1533, 905, 322, -214, -702, -1141, -1528, -1866,
+		-2153, -2390, -2579, -2721, -2818, -2873, -2887, -2864, -2807, -2719,
+		-2604, -2465, -2304, -2127, -1937, -1736, -1528, -1316, -1103, -892,
+		-686, -487, -296, -116, 51, 206, 345, 470, 579, 671, 748, 809, 855, 885,
+		902, 906, 897, 877, 847, 808, 762, 709, 652, 591, 526, 461, 395, 329,
+		265, 203, 144, 88, 36, -11, -54, -91, -124, -152, -175, -193, -207,
+		-216, -221, -222, -220, -215, -207, -197, -185, -172, -158, -142, -127,
+		-111, -96, -80, -66, -52, -39, -28, -17, -8, 1, 8, 13, 18, 22, 25, 26,
+		27, 28, 27, 26, 25, 23, 21, 19, 89 }; // Q19
+#endif
+
+static Word32 bitrev16[16] = { 0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7,
+		15 };
+
+sbc_aec_state state;
+Complex16_t twd[16];
+Complex16_t twd_32[16];
+
+FILE *dptr;
+FILE *dptr_i;
+FILE *dptr_ii;
+FILE *dptr_iii;
+FILE *dptr_iv;
+
+void init_twd() {
+	Word32 i;
+	for (i = 0; i < 16; i += 1) {
+		twd[i].real = 32767 * cosf(2 * pi * i / 16);
+		twd[i].imag = -32767 * sinf(2 * pi * i / 16);
+		twd_32[i].real = 32767 * cosf(2 * pi * i / 32);
+		twd_32[i].imag = -32767 * sinf(2 * pi * i / 32);
+	}
+}
+
+void init_sbc_aec_state(sbc_aec_state *st) {
+	Word32 i;
+#ifdef INLMS
+	Word32 j;
+#endif
+	st->cntr = 0;
+	st->blockInd = 0;
+	st->REY = 0;
+	st->RYY = 0;
+#ifndef DUAL_BAND
+	for (i = 0; i < 9; i += 1) {
+#else
+	for (i = 0; i < 17; i += 1) {
+#endif
+		memset(st->buffer_sbc_filt[i], 0, sizeof(Complex16_t) * TAIL_LENGTH);
+		memset(st->weight[i], 0, sizeof(Complex32_t) * TAIL_LENGTH); // gains or loss
+		(st->weight[i] + TAIL_LENGTH - 1)->real = 32767;
+		(st->weight[i] + TAIL_LENGTH - 1)->imag = 0;
+
+#ifdef EXPAND
+		st->Ev[i] = 0;
+#endif
+#ifdef INLMS
+		register Word32 j;
+		for (j = 0; j < TAIL_LENGTH; j += 1) {
+			st->psi[i][j].real = 1.f;
+			st->psi[i][j].imag = 0.f;
+		}
+		st->eta[i] = 0.f;
+#else
+		st->ng_noise_dur[i] = 0;
+		st->ng_gain[i] = 0;
+		st->PE[i] = 0;
+		st->PY[i] = 0;
+		st->PYY[i] = 0;
+		st->PEY[i] = 0;
+		st->gamma_echo_prev[i] = 128;
+		st->gh1[i] = 32767;
+#endif
+		st->rate[i] = 32767L; // adaptive learn rate
+		st->S_e[i].real = 0;
+		st->S_e[i].imag = 0;
+		st->S_y[i].real = 0;
+		st->S_y[i].imag = 0;
+		st->See[i] = 1;
+		st->Syy[i] = 1;
+		st->Sdd[i] = 1;
+		st->Sed[i].real = 1;
+		st->Sed[i].imag = 0;
+	}
+#ifndef DUAL_BAND
+	for (i = 0; i < 16; i += 1) {
+#else
+	for (i = 0; i < 32; i += 1) {
+#endif
+#ifndef DUAL_BAND
+		memset(st->buffer_sys[i], 0, sizeof(Word16) * 12);
+#else
+		memset(st->buffer_sys[i], 0, sizeof(Word16) * 6);
+#endif
+	}
+#ifndef DUAL_BAND
+	memset(st->buffer_far, 0, sizeof(Word16) * 144);
+	memset(st->buffer_near, 0, sizeof(Word16) * 144);
+#else
+	memset(st->buffer_far, 0, sizeof(Word16) * 264);
+	memset(st->buffer_near, 0, sizeof(Word16) * 264);
+#endif
+}
+
+void cfft_16_r4(Complex16_t input[], Complex16_t twd[]) { // decimation in frequency
+	Word32 m, n, k;
+	Word32 group = 1;
+	Word32 Nmr = 4;
+
+	Complex16_t * __restrict a;
+	Complex16_t * __restrict b;
+	Complex16_t * __restrict c;
+	Complex16_t * __restrict d;
+	Complex16_t temp;
+
+	//for (m = 0; m < 1; m += 1) { // stage
+	//for (n = 0; n < group; n += 1) {
+	a = input + 0 * Nmr;
+	b = input + 1 * Nmr;
+	c = input + 2 * Nmr;
+	d = input + 3 * Nmr;
+	for (k = 0; k < Nmr; k += 1) {
+#if 1
+		//a[k] = complex_asr(a[k], 1);
+		//b[k] = complex_asr(b[k], 1);
+		//c[k] = complex_asr(c[k], 1);
+		//d[k] = complex_asr(d[k], 1);
+#else
+		a[k].real = L_add(a[k].real * 16384, 0x4000) >> 15;
+		a[k].imag = L_add(a[k].imag * 16384, 0x4000) >> 15;
+		b[k].real = L_add(b[k].real * 16384, 0x4000) >> 15;
+		b[k].imag = L_add(b[k].imag * 16384, 0x4000) >> 15;
+		c[k].real = L_add(c[k].real * 16384, 0x4000) >> 15;
+		c[k].imag = L_add(c[k].imag * 16384, 0x4000) >> 15;
+		d[k].real = L_add(d[k].real * 16384, 0x4000) >> 15;
+		d[k].imag = L_add(d[k].imag * 16384, 0x4000) >> 15;
+#endif
+
+		temp = complex_add(a[k], c[k]);
+		c[k] = complex_sub(a[k], c[k]);
+		a[k] = temp;
+#if 1
+		//a[k] = complex_asr(a[k], 1);
+		//c[k] = complex_asr(c[k], 1);
+#else
+		a[k].real = L_add(a[k].real * 16384, 0x4000) >> 15;
+		a[k].imag = L_add(a[k].imag * 16384, 0x4000) >> 15;
+		c[k].real = L_add(c[k].real * 16384, 0x4000) >> 15;
+		c[k].imag = L_add(c[k].imag * 16384, 0x4000) >> 15;
+#endif
+
+		temp = complex_add(b[k], d[k]);
+		d[k] = complex_sub(b[k], d[k]);
+		b[k] = temp;
+#if 1
+		//b[k] = complex_asr(b[k], 1);
+		//d[k] = complex_asr(d[k], 1);
+#else
+		b[k].real = L_add(b[k].real * 16384, 0x4000) >> 15;
+		b[k].imag = L_add(b[k].imag * 16384, 0x4000) >> 15;
+		d[k].real = L_add(d[k].real * 16384, 0x4000) >> 15;
+		d[k].imag = L_add(d[k].imag * 16384, 0x4000) >> 15;
+#endif
+
+		temp = complex_add(a[k], b[k]);
+		b[k] = complex_sub(a[k], b[k]);
+		a[k] = temp;
+		temp = complex_add(c[k], complex_swap(d[k]));
+		d[k] = complex_sub(c[k], complex_swap(d[k]));
+		c[k] = temp;
+		b[k] = complex_mul(b[k], twd[k * 2]); // twd[2]
+		c[k] = complex_mul(c[k], twd[k * 1]); // twd[1]
+		d[k] = complex_mul(d[k], twd[k * 3]); // twd[3]
+		//}
+	}
+	group *= 4;
+	Nmr >>= 2;
+	//}
+
+	for (n = 0; n < group; n += 1) {
+		a = input + n * (4 * Nmr) + 0 * Nmr;
+		b = input + n * (4 * Nmr) + 1 * Nmr;
+		c = input + n * (4 * Nmr) + 2 * Nmr;
+		d = input + n * (4 * Nmr) + 3 * Nmr;
+#if 1
+		//a[0] = complex_asr(a[0], 1);
+		//b[0] = complex_asr(b[0], 1);
+		//c[0] = complex_asr(c[0], 1);
+		//d[0] = complex_asr(d[0], 1);
+#else
+		a[0].real = (a[0].real * 16384 + 0x4000) >> 15;
+		a[0].imag = (a[0].imag * 16384 + 0x4000) >> 15;
+		b[0].real = (b[0].real * 16384 + 0x4000) >> 15;
+		b[0].imag = (b[0].imag * 16384 + 0x4000) >> 15;
+		c[0].real = (c[0].real * 16384 + 0x4000) >> 15;
+		c[0].imag = (c[0].imag * 16384 + 0x4000) >> 15;
+		d[0].real = (d[0].real * 16384 + 0x4000) >> 15;
+		d[0].imag = (d[0].imag * 16384 + 0x4000) >> 15;
+#endif
+		temp = complex_add(a[0], c[0]);
+		c[0] = complex_sub(a[0], c[0]);
+		a[0] = temp;
+#if 1
+		//a[0] = complex_asr(a[0], 1);
+		//c[0] = complex_asr(c[0], 1);
+#else
+		a[0].real = L_add(a[0].real * 16384, 0x4000) >> 15;
+		a[0].imag = L_add(a[0].imag * 16384, 0x4000) >> 15;
+		c[0].real = L_add(c[0].real * 16384, 0x4000) >> 15;
+		c[0].imag = L_add(c[0].imag * 16384, 0x4000) >> 15;
+#endif
+
+		temp = complex_add(b[0], d[0]);
+		d[0] = complex_sub(b[0], d[0]);
+		b[0] = temp;
+#if 1
+		//b[0] = complex_asr(b[0], 1);
+		//d[0] = complex_asr(d[0], 1);
+#else
+		b[0].real = L_add(b[0].real * 16384, 0x4000) >> 15;
+		b[0].imag = L_add(b[0].imag * 16384, 0x4000) >> 15;
+		d[0].real = L_add(d[0].real * 16384, 0x4000) >> 15;
+		d[0].imag = L_add(d[0].imag * 16384, 0x4000) >> 15;
+#endif
+		temp = complex_add(a[0], b[0]);
+		b[0] = complex_sub(a[0], b[0]);
+		a[0] = temp;
+		temp = complex_add(c[0], complex_swap(d[0]));
+		d[0] = complex_sub(c[0], complex_swap(d[0]));
+		c[0] = temp;
+	}
+
+	for (m = 0; m < 16; m += 1) {
+		n = bitrev16[m];
+		if (n > m) {
+			swap_data(&input[m], &input[n]);
+		}
+	}
+
+}
+
+void rfft_32(Word16 *p, Complex16_t *twd) {
+	Word32 i;
+	Word32 L_var_out;
+	Complex16_t *out = (Complex16_t *) p;
+	Complex16_t Sin[16];
+	Complex16_t Fe[16];
+	Complex16_t Fo[16];
+
+	for (i = 0; i < 16; i += 1) {
+		Sin[i].real = (*p++ + 1) >> 1;
+		Sin[i].imag = (*p++ + 1) >> 1;
+	}
+
+	cfft_16_r4(Sin, twd);
+
+	for (i = 0; i < 16; i += 1) {
+		Fe[i] = complex_add(Sin[i], complex_conj(Sin[(16 - i) & 0xf]));
+		Fo[i] = complex_swap(
+				complex_sub(Sin[i], complex_conj(Sin[(16 - i) & 0xf])));
+	}
+
+	for (i = 1; i < 16; i += 1) {
+		out[i] = complex_add(Fe[i], complex_mul(Fo[i], twd_32[i]));
+	} // radix-2 DIT
+
+	L_var_out = L_sub(Fe[0].real << 16, Fo[0].real << 16); // nyquist
+	out[0].imag = L_var_out >> 16;
+	L_var_out = L_add(Fe[0].real << 16, Fo[0].real << 16); // dc
+	out[0].real = L_var_out >> 16;
+}
+
+void hs_ifft_32(Complex16_t *p, Word16 *out, Complex16_t *twd) {
+	Word32 i;
+	Complex16_t Zk[16];
+	for (i = 0; i < 16; i += 1) { // 0 : N/2-1
+		ComplexInt16 Fe;
+		ComplexInt16 Fo;
+
+		Fe = complex_add(complex_asr(p[i], 1),
+				complex_conj(complex_asr(p[16 - i], 1)));
+		Fo = complex_sub(complex_asr(p[i], 1),
+				complex_conj(complex_asr(p[16 - i], 1)));
+		Fo = complex_mul(Fo, complex_conj(twd_32[i]));
+		Zk[i] = complex_conj(complex_sub(Fe, complex_swap(Fo)));
+
+	} // Z[k] = Fe[k] + jFo[k]
+
+	cfft_16_r4(Zk, twd); // ifft
+
+	for (i = 15; i >= 0; i -= 1) {
+		Zk[i] = complex_conj(Zk[i]);
+	}
+	memmove(out, Zk, sizeof(Word16) * 32);
+}
+
+void dft_filt_bank(sbc_aec_state * __restrict st,
+		const Word16 * __restrict const near,
+		const Word16 * __restrict const far, Word16 * __restrict out,
+		UWord32 * __restrict debug) { // R = 24 or 12
+#ifdef FREQ_IDT // independent frequency-bin leakages
+#ifdef FIXED_POINT
+Word32 leak_freq_idt; // freq independent leakage
+Word64 REY;
+Word64 RYY;
+#else
+Float32 REY;
+Float32 RYY;
+Float32 leak_freq_idt;
+#endif
+#endif
+#ifdef FIXED_POINT
+	UWRD128 temp128;
+	UWRD128 tempi28;
+	UWRD128 tempii28;
+#endif
+	//Word64 PEY;
+	//Word64 PYY;
+	Word64 temp64;
+	Word64 acc_r;
+	Word64 acc_i;
+	Word64 fvect_real; // none linear processing
+	Word64 fvect_imag;
+	Word64 fnum_real;
+	Word64 fnum_imag;
+	Word64 fdenom_real;
+	Word64 fdenom_imag;
+	Word64 fpower;
+
+	Word32 i, j;
+	Word32 se;
+	Word32 mu_avg; // global adaption rates
+#ifndef INLMS
+	//Word32 beta; // beta ~= E[|Y|.^2] / E[|E|.^2]
+	//Word32 beta_1; // avg over none-DT periods
+#else
+	Float32 leak = 0.f;
+	Float32 temp;
+	Float32 FAcc_r;
+	Float32 FAcc_i;
+	Float32 a_real;
+	Float32 a_imag;
+	ComplexFloat32 * __restrict fcptr32_t;
+#endif
+	Word32 Acc_r;
+	Word32 Acc_i;
+	Word32 acc;
+#ifndef DUAL_BAND
+	Word16 w_f[144];
+	Word16 w_n[144];
+	Word32 tmp_f[16];
+	Word32 tmp_n[16];
+
+	Complex16_t S_p[9]; // processed spectral
+	Complex16_t S_v[16];// for synthesis
+	array_ptr ((__restrict) rptr_i);
+#else
+	Word16 w_f[264];
+	Word16 w_n[264];
+	Word32 tmp_f[32];
+	Word32 tmp_n[32];
+
+	Complex16_t S_p[17];
+	Complex16_t S_b[17];
+	Complex16_t S_v[17];
+	array_ptr __restrict rptr_i;
+#endif
+	Word16 * __restrict rptr;
+	Word32 * __restrict ptr;
+	Word32 * __restrict ptr_i;
+
+	Complex16_t S_f[16]; // Sf, Sf[0].real = dc, Sf[0].imag = nyquist
+	Complex16_t S_n[16]; // Sn, Sn[0].real = dc, Sn[0].imag = nyquist
+	Complex16_t * __restrict cptr;
+	Complex16_t * __restrict cptr_i;
+	Complex32_t * __restrict cptr32_t;
+
+#ifndef DUAL_BAND
+	memmove(&st->buffer_far[0], &st->buffer_far[12], 132 * sizeof(Word16));
+	memmove(&st->buffer_near[0], &st->buffer_near[12], 132 * sizeof(Word16));
+	memmove(&st->buffer_far[132], far, 12 * sizeof(Word16));
+	memmove(&st->buffer_near[132], near, 12 * sizeof(Word16));
+#else
+	memmove(&st->buffer_far[0], &st->buffer_far[24], 240 * sizeof(Word16));
+	memmove(&st->buffer_near[0], &st->buffer_near[24], 240 * sizeof(Word16));
+	memmove(&st->buffer_far[240], far, 24 * sizeof(Word16));
+	memmove(&st->buffer_near[240], near, 24 * sizeof(Word16));
+#endif
+
+#ifndef DUAL_BAND
+	for (i = 143; i >= 0; i -= 1) {
+		w_f[143 - i] = L_add(st->buffer_far[i] * hann_win[143 - i], 0x4000)
+		>> 15; // flipud
+		w_n[143 - i] = L_add(st->buffer_near[i] * hann_win[143 - i], 0x4000)
+		>> 15;// flipud
+	}
+#else
+	i = 263;
+	do {
+		w_f[263 - i] = L_add(st->buffer_far[i] * hann_win[263 - i], 0x10000)
+				>> 17; // flipud
+		w_n[263 - i] = L_add(st->buffer_near[i] * hann_win[263 - i], 0x10000)
+				>> 17; // flipud
+	} while ((i -= 1) >= 0);
+
+#endif
+
+#ifndef DUAL_BAND
+	memset(tmp_f, 0, sizeof(Word32) * 16);
+	memset(tmp_n, 0, sizeof(Word32) * 16);
+
+	for (j = 0; j < 144; j += 16) {
+		tmp_f[0] += w_f[j];
+		tmp_n[0] += w_n[j];
+	}
+	tmp_f[0] = (tmp_f[0] + 4) >> 3;
+	tmp_n[0] = (tmp_n[0] + 4) >> 3;
+
+	for (i = 1; i < 16; i += 1) {
+		for (j = 16 - i; j < 144; j += 16) {
+			tmp_f[i] += w_f[j];
+			tmp_n[i] += w_n[j];
+		}
+		tmp_f[i] = (tmp_f[i] + 4) >> 3;
+		tmp_n[i] = (tmp_n[i] + 4) >> 3;
+	}
+
+	circshift(tmp_f, st->cntr & 0x000f, 16);
+	circshift(tmp_n, st->cntr & 0x000f, 16);
+#else
+	memset(tmp_f, 0, sizeof(Word32) * 32);
+	memset(tmp_n, 0, sizeof(Word32) * 32);
+
+	for (j = 0; j < 264; j += 32) {
+		tmp_f[0] += w_f[j];
+		tmp_n[0] += w_n[j];
+	}
+	tmp_f[0] >>= 2;
+	tmp_n[0] >>= 2;
+
+	i = 1;
+	do {
+		j = 32 - i;
+		do {
+			tmp_f[i] += w_f[j];
+			tmp_n[i] += w_n[j];
+
+		} while ((j += 32) < 264);
+
+		tmp_f[i] >>= 2;
+		tmp_n[i] >>= 2;
+
+	} while ((i += 1) < 32);
+
+	circshift(tmp_f, st->cntr & 0x001f, 32);
+	circshift(tmp_n, st->cntr & 0x001f, 32);
+#endif
+
+#ifndef DUAL_BAND
+	memset(S_f, 0, sizeof(Complex16_t) * 16);
+	memset(S_n, 0, sizeof(Complex16_t) * 16);
+
+	ptr = tmp_f;
+	ptr_i = tmp_n;
+	cptr = S_f;
+	cptr_i = S_n;
+
+	for (i = 16; i != 0; i -= 2) {
+		cptr++->real = sat_32_16(*ptr++);
+		cptr_i++->real = sat_32_16(*ptr_i++);
+		cptr++->real = sat_32_16(*ptr++);
+		cptr_i++->real = sat_32_16(*ptr_i++);
+	}
+
+	cfft_16_r4(S_f, twd); // radix 4
+	cfft_16_r4(S_n, twd);// * 1 / 16
+#else
+	ptr = tmp_f;
+	ptr_i = tmp_n;
+	cptr = S_f; // S_f[0].real, dc : S_f[0].imag, nyquist
+	cptr_i = S_n;
+	for (i = 32; i != 0; i -= 2) {
+		cptr->real = sat_32_16(*ptr++);
+		cptr++->imag = sat_32_16(*ptr++);
+		cptr_i->real = sat_32_16(*ptr_i++);
+		cptr_i++->imag = sat_32_16(*ptr_i++);
+	}
+
+	rfft_32((Word16 *) S_f, twd); // drop dc and nyquist bands, Q3 format
+	rfft_32((Word16 *) S_n, twd); // drop dc and nyquist bands
+#endif
+
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+		memmove(&st->buffer_sbc_filt[i][0], &st->buffer_sbc_filt[i][1],
+				sizeof(Complex16_t) * (TAIL_LENGTH - 1)); // [old, ..., new]
+		st->buffer_sbc_filt[i][TAIL_LENGTH - 1] = S_f[i];
+	}
+
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) { // band
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+		Acc_r = 0L;
+		Acc_i = 0L;
+		cptr = st->buffer_sbc_filt[i]; // 16-bit
+		cptr32_t = st->weight[i]; // 32-bit
+		for (j = TAIL_LENGTH; j != 0; j -= 4) {
+#ifdef __use_asm__
+			MLA(cptr->real, cptr32_t->real);
+			MLA(cptr->imag, cptr32_t->imag);
+			Acc_i += cptr->imag * cptr32_t->real;
+			Acc_i -= cptr++->real * cptr32_t++->imag;
+			MLA(cptr->real, cptr32_t->real);
+			MLA(cptr->imag, cptr32_t->imag);
+			Acc_i += cptr->imag * cptr32_t->real;
+			Acc_i -= cptr++->real * cptr32_t++->imag;
+			MLA(cptr->real, cptr32_t->real);
+			MLA(cptr->imag, cptr32_t->imag);
+			Acc_i += cptr->imag * cptr32_t->real;
+			Acc_i -= cptr++->real * cptr32_t++->imag;
+			MLA(cptr->real, cptr32_t->real);
+			MLA(cptr->imag, cptr32_t->imag);
+			Acc_i += cptr->imag * cptr32_t->real;
+			Acc_i -= cptr++->real * cptr32_t++->imag;
+#else
+			Acc_r += cptr->real * cptr32_t->real; // risk
+			Acc_r += cptr->imag * cptr32_t->imag;
+			Acc_i += cptr->imag * cptr32_t->real;
+			Acc_i -= cptr++->real * cptr32_t++->imag;
+			Acc_r += cptr->real * cptr32_t->real;
+			Acc_r += cptr->imag * cptr32_t->imag;
+			Acc_i += cptr->imag * cptr32_t->real;
+			Acc_i -= cptr++->real * cptr32_t++->imag;
+			Acc_r += cptr->real * cptr32_t->real;
+			Acc_r += cptr->imag * cptr32_t->imag;
+			Acc_i += cptr->imag * cptr32_t->real;
+			Acc_i -= cptr++->real * cptr32_t++->imag;
+			Acc_r += cptr->real * cptr32_t->real;
+			Acc_r += cptr->imag * cptr32_t->imag;
+			Acc_i += cptr->imag * cptr32_t->real;
+			Acc_i -= cptr++->real * cptr32_t++->imag;
+#endif
+		}
+#ifndef INLMS
+		st->PY[i] -= st->PY[i] >> 4; // (32-bit * 32-bit) mod 2^32
+		st->PY[i] -= st->S_y[i].real * st->S_y[i].real >> 4; // Q15
+		st->PY[i] -= st->S_y[i].imag * st->S_y[i].imag >> 4;
+#endif
+#ifdef __use_asm__
+		Acc_r = READ_MAC_SHR0(); // if final result falls in [0, 2^32-1]
+#endif
+		st->S_y[i].real = sat_32_16((Word32) (L_add(Acc_r, 0x4000) >> 15));
+		st->S_y[i].imag = sat_32_16((Word32) (L_add(Acc_i, 0x4000) >> 15));
+#ifndef INLMS
+		st->PY[i] += st->S_y[i].real * st->S_y[i].real >> 4;
+		st->PY[i] += st->S_y[i].imag * st->S_y[i].imag >> 4; // dc rejected
+#endif
+	} // x * h' = (a + jb) * (c - jd)
+
+	cptr = &st->S_e[1];
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+#ifndef INLMS
+		st->PE[i] -= st->PE[i] >> 4;
+		st->PE[i] -= cptr->real * cptr->real >> 4;
+		st->PE[i] -= cptr->imag * cptr->imag >> 4;
+#endif
+		*cptr = complex_sub(S_n[i], st->S_y[i]);
+#ifndef INLMS
+		st->PE[i] += cptr->real * cptr->real >> 4;
+		st->PE[i] += cptr->imag * cptr->imag >> 4;
+#endif
+		st->Syy[i] -= L_add(st->Syy[i], 0x0002) >> 2;
+		st->Syy[i] += L_add(st->S_y[i].real * st->S_y[i].real, 0x0002) >> 2;
+		st->Syy[i] += L_add(st->S_y[i].imag * st->S_y[i].imag, 0x0002) >> 2;
+		st->Sdd[i] -= L_add(st->Sdd[i], 0x0002) >> 2;
+		st->Sdd[i] += L_add(S_n[i].real * S_n[i].real, 0x0002) >> 2;
+		st->Sdd[i] += L_add(S_n[i].imag * S_n[i].imag, 0x0002) >> 2;
+		st->See[i] -= L_add(st->See[i], 0x0002) >> 2;
+		st->See[i] += L_add(cptr->real * cptr->real, 0x0002) >> 2;
+		st->See[i] += L_add(cptr->imag * cptr->imag, 0x0002) >> 2;
+		st->Sed[i].real -= L_add(st->Sed[i].real, 0x0002) >> 2;
+		st->Sed[i].real += L_add(cptr->real * S_n[i].real, 0x0002) >> 2;
+		st->Sed[i].real += L_add(cptr->imag * S_n[i].imag, 0x0002) >> 2;
+		st->Sed[i].imag -= L_add(st->Sed[i].imag, 0x0002) >> 2;
+		st->Sed[i].imag += L_add(cptr->imag * S_n[i].real, 0x0002) >> 2;
+		st->Sed[i].imag -= L_add(cptr++->real * S_n[i].imag, 0x0002) >> 2;
+#ifdef INLMS
+		temp64 = 32767.f * (st->Syy[i] * exp(leak / 2048.f))
+		/ (st->See[i] + .01f * eps); // freq. independent leakage
+		temp64 = (temp64 <= 32767) ? temp64 : 32767;
+
+		if (st->blockInd < END_STARTUP) {
+			st->rate[i] = 8192;
+			st->blockInd++;
+		} else {
+			st->rate[i] = temp64;
+		}
+#endif
+	}
+
+#ifndef INLMS
+#ifdef FREQ_IDT
+	acc_r = 0;
+	acc_i = 0;
+	PEY = 0;
+	PYY = 0;
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+		for (i = 1; i < 14; i += 1) {
+#endif
+			register Word32 Eh, Yh;
+			acc_r += st->Syy[i];
+			acc_i += st->See[i];
+			//acc_r += st->S_y[i].real * st->S_y[i].real; // original paper
+			//acc_r += st->S_y[i].imag * st->S_y[i].imag;
+			//acc_i += st->S_e[i].real * st->S_e[i].real;
+			//acc_i += st->S_e[i].imag * st->S_e[i].imag;
+			Eh = st->S_e[i].real * st->S_e[i].real;
+			Eh += st->S_e[i].imag * st->S_e[i].imag;
+			Eh -= st->PE[i];// x.^2 - mean(x.^2)
+			Yh = st->S_y[i].real * st->S_y[i].real;
+			Yh += st->S_y[i].imag * st->S_y[i].imag;
+			Yh -= st->PY[i];
+			PEY += (Word64) Eh * Yh;
+			PYY += (Word64) Yh * Yh;
+		}
+		PYY = sqrt(max(PYY, 0)); // PYY.^0.5
+		PEY = max(PEY, 0) / (1 + PYY);// for reduce dynamic range, PEY / PYY.^0.5
+
+		temp64 = mul_64_64((Word64) beta0, acc_r);// simplify
+		temp64 = (temp64 > beta_max * acc_i) ? beta_max * acc_i : temp64;
+		beta = temp64 / (acc_i + eps);// max{beta} = beta0
+		beta_1 = 0x7fff - beta;// global beta(l)
+		REY = 0;
+		RYY = 0;
+		st->REY *= beta_1;
+		st->REY += (Float32) beta * PEY;
+		st->REY /= 32768;
+		st->RYY *= beta_1;
+		st->RYY += (Float32) beta * PYY;
+		st->RYY /= 32768;
+		st->REY = (st->REY < st->RYY / 16) ? st->RYY / 16 : st->REY;
+		leak_freq_idt = 32767 * st->REY / (1 + st->RYY);
+#endif
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+#ifndef FREQ_IDT
+		/*temp64 = (Word64) beta0 * st->Syy[i]; // regression among none DT periods
+		 temp64 =
+		 (temp64 > (Word64) beta_max * st->See[i]) ?
+		 (Word64) beta_max * st->See[i] : temp64;
+		 beta = temp64 / (st->See[i] + eps);
+		 beta_1 = 0x7fff - beta;*/
+#endif
+#ifdef FIXED_POINT
+		/*temp64 = ABS((Word64)st->PY[i]) * ABS(st->PE[i]); // dc-rejected
+		 temp128 = umul_64_128((UWord64) st->PEY[i], (UWord64) beta_1);
+		 tempi28 = umul_64_128(temp64, (UWord64) beta);
+		 temp128 = uadd_128(temp128, tempi28);
+		 temp64 = temp128.a0 >> 15; // * 2^-15
+		 temp64 += (UWord64) temp128.a1 << 17;
+		 temp64 += ((UWord64) temp128.a2 & 0x7fff) << 49;
+		 st->PEY[i] = temp64;
+
+		 temp64 = ABS((Word64)st->PY[i]) * ABS(st->PY[i]);
+		 temp128 = umul_64_128((UWord64) st->PYY[i], (UWord64) beta_1);
+		 tempi28 = umul_64_128(temp64, (UWord64) beta);
+		 temp128 = uadd_128(temp128, tempi28);
+		 temp64 = temp128.a0 >> 15; // unsigned
+		 temp64 += (UWord64) temp128.a1 << 17;
+		 temp64 += ((UWord64) temp128.a2 & 0x7fff) << 49;
+		 st->PYY[i] = temp64;*/
+#else
+		st->PEY[i] *= beta_1;
+		st->PEY[i] += ((Float32) beta * ABS(st->PE[i])) * ABS(st->PY[i]);
+		//st->PEY[i] += ((Float32) beta * st->PE[i]) * st->PY[i];
+		st->PEY[i] /= 32768;
+
+		st->PYY[i] *= beta_1;
+		st->PYY[i] += ((Float32) beta * ABS(st->PY[i])) * ABS(st->PY[i]);
+		st->PYY[i] /= 32768;
+#endif
+		/*st->PEY[i] = (st->PEY[i] > st->PYY[i]) ? st->PYY[i] : st->PEY[i];
+		 st->PEY[i] =\
+		 (st->PEY[i] < st->PYY[i] / 64) ? st->PYY[i] / 64 : st->PEY[i];*/
+#ifdef FREQ_IDT
+#ifndef DUAL_BAND
+		REY += st->PEY[i] / 8;
+		RYY += st->PYY[i] / 8;
+#else
+		REY += st->PEY[i] / 16;
+		RYY += st->PYY[i] / 16;
+#endif
+#endif
+#ifndef FREQ_IDT
+#ifndef FIXED_POINT
+		st->leak_esti[i] = udiv_128_64(eps + st->PYY[i], st->PEY[i]);
+#else
+		//temp128 = umul_64_128(st->PEY[i], (UWord64) 32767);
+		//st->leak_esti[i] = udiv_128_64(eps + st->PYY[i], st->PEY[i]);
+		//speex_get_residual_echo(st, st->S_y, S_b);
+		get_residual_echo(st, S_n, st->S_e, st->S_y, S_b);
+#endif
+#endif
+	}
+#ifdef FREQ_IDT
+#ifdef FIXED_POINT
+	//temp128 = umul_64_128(REY, (UWord64) 32767); // independent to freq.
+	leak_freq_idt = udiv_128_64(eps + RYY, REY);
+#else
+	leak_freq_idt = 32767 * REY / (eps + RYY);
+#endif
+#endif
+#endif
+
+#ifndef INLMS
+#ifndef FREQ_IDT
+	Acc_r = 0;
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+		Acc_r += st->leak_esti[i];
+	}
+#ifndef DUAL_BAND
+	Acc_r *= 5461;
+	Acc_r >>= 15;
+#else
+	Acc_r *= 2521;
+	Acc_r >>= 15;
+#endif
+	WRITE(&Acc_r, sizeof(Word32), 1, dptr_ii);
+#else
+#ifdef FIXED_POINT
+	WRITE(&leak_freq_idt, sizeof(Word32), 1, dptr_ii);
+#else
+	WRITE(&leak_freq_idt, sizeof(Float32), 1, dptr_ii);
+#endif
+#endif
+#endif
+
+#ifndef INLMS
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+#if 1
+#ifdef __use_asm__
+		//MLA(st->S_y[i].real, st->S_y[i].real);
+		//MLA(st->S_y[i].imag, st->S_y[i].imag);
+		//Acc_r = READ_MAC_SHR0();
+		MLA(st->S_e[i].real, st->S_e[i].real);
+		MLA(st->S_e[i].imag, st->S_e[i].imag);
+		Acc_i = READ_MAC_SHR0();
+#else
+		Acc_r = st->S_y[i].real * st->S_y[i].real; // instaneously Y.^2(k, l) / E.^2(k, l)
+		Acc_r += st->S_y[i].imag * st->S_y[i].imag;
+		Acc_i = st->S_e[i].real * st->S_e[i].real;
+		Acc_i += st->S_e[i].imag * st->S_e[i].imag;
+#endif
+#endif
+#ifdef FREQ_IDT
+		st->rate[i] = min((Word64 ) leak_freq_idt * Acc_r / (Acc_i + 1), 32767);
+#else
+		/*st->rate[i] = min((Word64 ) st->leak_esti[i] * Acc_r / (Acc_i + 1),
+		 32767);*/
+		MLA(S_b[i].real, S_b[i].real);
+		MLA(S_b[i].imag, S_b[i].imag);
+		Acc_r = READ_MAC_SHR0();
+#endif
+		if (st->blockInd < END_STARTUP) {
+			st->rate[i] = 8192;
+			st->blockInd++;
+		} else {
+			st->rate[i] = min(udiv_64_32(Acc_i + 1, Acc_r), 32767);
+		}
+	}
+#endif
+
+#if 1
+	mu_avg = 0L;
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+		mu_avg += st->rate[i];
+	}
+
+#ifndef DUAL_BAND
+	mu_avg = sat_32_16(mu_avg * 5461 >> 15);
+#else
+	mu_avg = sat_32_16(mu_avg * 2521 >> 15);
+
+#endif
+	WRITE(&mu_avg, sizeof(Word32), 1, dptr_i);
+#endif
+	alpha = L_mult(mu_avg, 64) >> 16; // double talk detector
+
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+
+#if 0 // regardless of imag parts
+		fnum_real = (Word64) st->S_e[i].real * st->Sed[i].real; // 2^15 * 2^31 = 2^46
+		fnum_real -= (Word64) st->S_e[i].imag * st->Sed[i].imag;// 2^47
+		fnum_imag = (Word64) st->S_e[i].imag * st->Sed[i].real;
+		fnum_imag += (Word64) st->S_e[i].real * st->Sed[i].imag;// 2^47
+		fnum_real >>= 4;
+		fnum_imag >>= 4;
+		fdenom_real = st->Syy[i] * alpha;// 2^3 * 2^31 = 2^34
+		fdenom_real += st->Sed[i].real;// 2^31 + 2^34
+		fdenom_imag = st->Sed[i].imag;// 2^31
+		fdenom_real >>= 4;
+		fdenom_imag >>= 4;
+		temp128 = smul_64_128(fdenom_real, fdenom_real);
+		tempi28 = smul_64_128(fdenom_imag, fdenom_imag);
+		temp128 = uadd_128(temp128, tempi28);
+		//fpower = fdenom_real * fdenom_real + fdenom_imag * fdenom_imag; // 2^58 + 2^64
+		fpower = sat_128_64(temp128);
+		tempi28 = smul_64_128(fnum_real, fdenom_real);
+		tempii28 = smul_64_128(fnum_imag, fdenom_imag);
+		tempi28 = uadd_128(tempi28, tempii28);
+		fvect_real = sat_128_64(tempi28);
+		//fvect_real = fnum_real * fdenom_real; // 2^32 * 2^45 = 2^77
+		//fvect_real += fnum_imag * fdenom_imag; // 2^29 * 2^2^45 = 2^74
+		tempi28 = smul_64_128(fnum_imag, fdenom_real);
+		tempii28 = smul_64_128(fnum_real, fdenom_imag);
+		tempi28 = usub_128(tempi28, tempii28);
+		fvect_imag = sat_128_64(tempi28);
+		//fvect_imag = fnum_imag * fdenom_real; // <= 2^63 - 1
+		//fvect_imag -= fnum_real * fdenom_imag;
+		S_p[i].real = sdiv_64_64(1 + fpower, fvect_real);
+		S_p[i].imag = sdiv_64_64(1 + fpower, fvect_imag);
+#else
+		Word32 register gain;
+		//Word32 register gain_1;
+
+		fdenom_real = alpha * st->Syy[i];
+		//fdenom_imag = fdenom_real;
+		fdenom_real += st->Sed[i].real;
+		/*gain = min(
+		 ABS(sdiv_64_64(fdenom_real, (Word64 ) st->Sed[i].real << 15)),
+		 32767);
+		 fdenom_imag += st->Sdd[i];
+		 gain_1 = min(
+		 ABS(sdiv_64_64(fdenom_imag, (Word64 ) st->Sed[i].real << 15)),
+		 32767);*/
+
+		gain = min(ABS((Word64)st->Sed[i].real << 15) / (1 + ABS(fdenom_real)),
+				32767);
+		gain = L_mult(gain, gain) >> 16;
+
+		S_p[i].real = L_mult(st->S_e[i].real, gain) >> 16;
+		S_p[i].imag = L_mult(st->S_e[i].imag, gain) >> 16;
+
+#endif
+
+#ifdef EXPAND
+		st->Ev[i] -= st->Ev[i] >> 3;
+#ifdef __use_asm__
+		MLA(S_p[i].real, S_p[i].real);
+		MLA(S_p[i].imag, S_p[i].imag);
+		Acc_r = READ_MAC_SHR0();
+#else
+		Acc_r = S_p[i].real * S_p[i].real;
+		Acc_r += S_p[i].imag * S_p[i].imag;
+#endif
+		st->Ev[i] += (Word32) usqrt(Acc_r) >> 3;
+#endif
+	}
+
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+	for (i = 1; i < 14; i += 1) {
+#endif
+		acc_r = eps;
+		cptr = st->buffer_sbc_filt[i];
+		cptr_i = st->buffer_sbc_filt[i];
+		for (j = TAIL_LENGTH; j != 0; j -= 2) {
+			acc_r += cptr->real * cptr_i->real;
+			acc_r += cptr++->imag * cptr_i++->imag;
+			acc_r += cptr->real * cptr_i->real;
+			acc_r += cptr++->imag * cptr_i++->imag;
+		}
+
+		se = ulog2(acc_r);
+#ifdef FREQ_IDT
+		//acc_r = mu_avg * st->S_e[i].real; // Q15
+		//acc_i = mu_avg * st->S_e[i].imag; // 32-bit
+		acc_r = st->rate[i] * st->S_e[i].real;
+		acc_i = st->rate[i] * st->S_e[i].imag;
+#else
+		acc_r = st->rate[i] * st->S_e[i].real;
+		acc_i = st->rate[i] * st->S_e[i].imag;
+#endif
+		cptr = st->buffer_sbc_filt[i];
+		cptr32_t = st->weight[i];
+		for (j = TAIL_LENGTH; j != 0; j -= 1) {
+			temp64 = acc_r * cptr->real;
+			temp64 += acc_i * cptr->imag;
+#ifdef LEAK_LMS
+			cptr32_t->real -= L_add(cptr32_t->real, 256) >> 9;
+#endif
+			cptr32_t->real += (Word32) (temp64 >> se);
+			temp64 = acc_r * cptr->imag;
+			temp64 -= acc_i * cptr++->real;
+#ifdef LEAK_LMS
+			cptr32_t->imag -= L_add(cptr32_t->imag, 256) >> 9;
+#endif
+			cptr32_t++->imag += (Word32) (temp64 >> se);
+		}
+#ifdef INLMS
+		FAcc_r = 0.f;
+		FAcc_i = 0.f;
+		cptr = st->buffer_sbc_filt[i]; // conj, a-jb
+		fcptr32_t = st->psi[i];// c+jd
+		j = TAIL_LENGTH;
+		do {
+			FAcc_r += cptr->real * fcptr32_t->real;
+			FAcc_r += cptr->imag * fcptr32_t->imag;
+			FAcc_i += cptr->real * fcptr32_t->imag;
+			FAcc_i -= cptr++->imag * fcptr32_t++->real;
+		}while(--j != 0);
+
+		a_real = FAcc_r / (st->See[i] + eps);
+		a_imag = FAcc_i / (st->See[i] + eps);
+
+		temp = a_real * st->S_e[i].real;
+		temp -= a_imag * st->S_e[i].imag; // real{}
+		temp *= st->Syy[i];
+		temp /= st->See[i] + eps;
+		temp /= pow(2, se);// tho
+
+		st->eta[i] *= 0.9961f;
+		st->eta[i] += temp;// Q11
+
+		cptr = st->buffer_sbc_filt[i];// c+jd
+		fcptr32_t = st->psi[i];
+		FAcc_r = FAcc_r / pow(2, se);
+		FAcc_i = FAcc_i / pow(2, se);
+		for (j = TAIL_LENGTH; j != 0; j -= 1) {
+			fcptr32_t->real += cptr->real * st->S_e[i].real; // a-jb
+			fcptr32_t->real += cptr->imag * st->S_e[i].imag;
+			fcptr32_t->imag += cptr->imag * st->S_e[i].real;
+			fcptr32_t->imag -= cptr->real * st->S_e[i].imag;
+			temp = FAcc_r * cptr->real;
+			temp -= FAcc_i * cptr->imag;// real
+			fcptr32_t->real -= temp * st->rate[i] / 32768.f;
+			temp = FAcc_r * cptr->imag;// imag
+			temp += FAcc_i * cptr++->real;
+			fcptr32_t++->imag -= temp * st->rate[i] / 32768.f;
+		}
+#endif
+	}
+
+#ifdef INLMS
+	leak = 0;
+#ifndef DUAL_BAND
+	for (i = 1; i < 7; i += 1) {
+#else
+		for (i = 1; i < 14; i += 1) {
+#endif
+			leak += st->eta[i];
+		}
+#ifndef DUAL_BAND
+		leak /= 6;
+#else
+		leak /= 13;
+#endif
+		WRITE(&leak, sizeof(Float32), 1, dptr_ii);
+#endif
+
+#ifndef DUAL_BAND
+	for (i = 6; i != 0; i -= 1) {
+#ifdef EXPAND
+		Acc_r = (max(st->Ev[i], 0) > EXPAND_KNEE) ? EXPAND_KNEE : st->Ev[i];
+		S_v[i].real = sdiv_32_32(EXPAND_KNEE, S_p[i].real * Acc_r);
+		S_v[i].imag = sdiv_32_32(EXPAND_KNEE, -S_p[i].imag * Acc_r);
+#else
+		S_v[i].real = S_p[i].real;
+		S_v[i].imag = -S_p[i].imag;
+#endif
+	}
+#else
+	for (i = 13; i != 0; i -= 1) {
+#ifdef EXPAND
+#if 0
+		register Word32 tgain = 164; // floor
+		if (max(st->Ev[i], 0) > EXPAND_KNEE) {
+			st->ng_noise_dur[i] = 134; // 3*134 = 402ms
+			tgain = 32767;
+		} else {
+			if (st->ng_noise_dur[i] > 0) {
+				st->ng_noise_dur[i] -= 1;
+				tgain = 32767;
+			}
+		}
+		st->ng_gain[i] -= st->ng_gain[i] >> 2;
+		st->ng_gain[i] += tgain >> 2;
+		S_v[i].real = L_mult(S_p[i].real, st->ng_gain[i]) >> 16;
+		S_v[i].imag = L_mult(S_p[i].imag, st->ng_gain[i]) >> 16;
+#else
+		Acc_r = (max(st->Ev[i], 0) > EXPAND_KNEE) ? EXPAND_KNEE : st->Ev[i];
+		S_v[i].real = sdiv_32_32(EXPAND_KNEE, S_p[i].real * Acc_r);
+		S_v[i].imag = sdiv_32_32(EXPAND_KNEE, S_p[i].imag * Acc_r);
+
+#endif
+#else
+		S_v[i].real = S_p[i].real;
+		S_v[i].imag = S_p[i].imag;
+#endif
+	}
+#endif
+
+#ifndef DUAL_BAND
+	S_v[0].real = S_v[7].real = S_v[8].real = 0; // 3250Hz
+	S_v[0].imag = S_v[7].imag = S_v[8].imag = 0;
+#else
+	S_v[0].real = S_v[14].real = S_v[15].real = S_v[16].real = 0; // 3375Hz
+	S_v[0].imag = S_v[14].imag = S_v[15].imag = S_v[16].imag = 0;
+#endif
+
+#ifndef DUAL_BAND
+	for (i = 9; i < 16; i += 1) {
+		S_v[i].real = S_v[16 - i].real;
+		S_v[i].imag = -S_v[16 - i].imag;
+	}
+
+	cfft_16_r4(S_v, twd);
+#else
+	hs_ifft_32(S_v, (Word16 *) S_v, twd); // S_v : 32 samples
+#endif
+
+#ifndef DUAL_BAND
+	for (i = 0; i < 16; i += 1) {
+		memmove(&st->buffer_sys[i][0], &st->buffer_sys[i][1],
+				sizeof(Word16) * 11);
+		st->buffer_sys[i][11] = S_v[i].real; // * 1 / 16
+	}
+#else
+	rptr = (Word16 *) S_v;
+	for (i = 0; i < 32; i += 1) {
+		memmove(&st->buffer_sys[i][0], &st->buffer_sys[i][1],
+				sizeof(Word16) * 10);
+		st->buffer_sys[i][10] = *rptr++;
+	}
+
+#endif
+#ifndef DUAL_BAND
+	for (i = 0; i < 12; i += 1) {
+#ifndef __use_asm__
+		acc = 0;
+#endif
+		rptr = st->buffer_sys[st->cntr & 0x000f];
+		rptr_i = (array_ptr) &hann_win[11 - i];
+		j = 12;
+		do {
+#ifdef __use_asm__
+			MLA(*rptr++, (Word16) (*rptr_i++)[0]);
+			MLA(*rptr++, (Word16) (*rptr_i++)[0]);
+			MLA(*rptr++, (Word16) (*rptr_i++)[0]);
+			MLA(*rptr++, (Word16) (*rptr_i++)[0]);
+#else
+			acc += *rptr++ * (Word16) (*rptr_i++)[0]; // * 2^18
+			acc += *rptr++ * (Word16) (*rptr_i++)[0];
+			acc += *rptr++ * (Word16) (*rptr_i++)[0];
+			acc += *rptr++ * (Word16) (*rptr_i++)[0];// 2^-18 * 12
+#endif
+		}while ((j -= 4) != 0);
+#ifdef __use_asm__
+		acc = READ_MAC_SHR0();
+#endif
+		acc += acc >> 1; // acc * (1.5)
+		*out++ = sat_32_16(L_add(acc, 0x4000) >> 15);
+		st->cntr++;
+	}
+#else
+	for (i = 0; i < 24; i += 1) {
+#ifndef __use_asm__
+		acc = 0;
+#endif
+		rptr = st->buffer_sys[st->cntr & 0x001f]; // 32-point ifft
+		rptr_i = (array_ptr) &hann_win[23 - i];
+
+		j = 11;
+		do {
+#ifndef __use_asm__
+			acc += *rptr++ * (*rptr_i++)[0];
+#else
+			MLA(*rptr++, (*rptr_i++)[0]);
+#endif
+		} while (--j != 0);
+
+#ifdef __use_asm__
+		acc = READ_MAC_SHR0();
+#endif
+		acc += acc >> 1;
+		*out++ = sat_32_16(L_add(acc, 0x2000) >> 14);
+		st->cntr++;
+	}
+#endif
+}
+
+void speex_get_residual_echo(sbc_aec_state *st, Complex16_t *S_y,
+		Complex16_t *Sout) {
+
+	Word32 i;
+	Word32 beta;
+	Word32 beta_1;
+	Word64 temp64;
+	UWRD128 temp128;
+	UWRD128 tempi28;
+	i = 1;
+	do {
+		register Word32 idx;
+		temp64 = (Word64) beta0 * st->Syy[i]; // correlations among error / echo
+		temp64 =
+				(temp64 > (Word64) beta_max * st->See[i]) ?
+						(Word64) beta_max * st->See[i] : temp64;
+		beta = temp64 / (st->See[i] + eps);
+		beta_1 = 0x7fff - beta;
+		temp64 = (Word64) st->PY[i] * st->PE[i];
+		temp128 = smul_64_128((Word64) st->PEY[i], (Word64) beta_1);
+		tempi28 = smul_64_128((Word64) temp64, (Word64) beta);
+
+		//temp64 = ABS((Word64 )st->PY[i]) * ABS(st->PE[i]);
+		//temp128 = umul_64_128((UWord64) st->PEY[i], (UWord64) beta_1);
+		//tempi28 = umul_64_128((UWord64) temp64, (UWord64) beta);
+		temp128 = uadd_128(temp128, tempi28);
+		temp64 = temp128.a0 >> 15; // * 2^-15
+		temp64 += (UWord64) temp128.a1 << 17;
+		temp64 += ((UWord64) temp128.a2 & 0x7fff) << 49;
+		st->PEY[i] = max(temp64, 0);
+		temp64 = (Word64) st->PY[i] * st->PY[i];
+		temp128 = umul_64_128((UWord64) st->PYY[i], (UWord64) beta_1);
+		tempi28 = umul_64_128(temp64, (UWord64) beta);
+		temp128 = uadd_128(temp128, tempi28);
+		temp64 = temp128.a0 >> 15; // unsigned
+		temp64 += (UWord64) temp128.a1 << 17;
+		temp64 += ((UWord64) temp128.a2 & 0x7fff) << 49;
+		st->PYY[i] = temp64;
+		idx = st->PEY[i] < (st->PYY[i] >> 6); // +/<<>&&&
+		st->PEY[i] = (idx) ? (st->PYY[i] >> 6) : st->PEY[i];
+		st->PEY[i] = (st->PEY[i] > st->PYY[i]) ? st->PYY[i] : st->PEY[i]; // ERLE<=18dB
+		st->leak_esti[i] = udiv_128_64(1 + st->PYY[i],
+				1 + (UWord64) st->PEY[i]);
+	} while (++i < 14);
+}
+
+/* Total Echo = Filter_MMSE(near_end, error_signal)
+ * Residual Echo ~= Total Echo - Linear Echo
+ * if Total_Echo == Linear Echo(good channel identifications or Filter_LSE(near_end))
+ * = near_end ^ (near_end - estimated_echo), Gain .* near_end == near_end - echo_est
+ * = near_end .* (1 - echo_est / near_end)
+ * */
+
+void get_residual_echo(sbc_aec_state * __restrict st,
+		Complex16_t * __restrict Sin, Complex16_t * __restrict Nin,
+		Complex16_t * __restrict S_y, Complex16_t * __restrict Sout) { // near_end, normal 2-byte aligned
+	Word32 i;
+	Word32 Acc_r;
+	Word32 Acc_i;
+
+#if 0
+	Word32 * ptr = (Word32*) (Sin + 1);
+	Word32 *rptr = (Word32*) (Nin + 1);
+#endif
+
+	i = 1;
+	do {
+		register Word32 gain;
+		register Word32 xi_echo;
+		register Word32 temp;
+		register Word32 gamma_echo;
+
+#if 1
+		MLA(Sin[i].real, Sin[i].real);
+		MLA(Sin[i].imag, Sin[i].imag);
+		Acc_r = READ_MAC_SHR0();
+		MLA(Nin[i].real, Nin[i].real);
+		MLA(Nin[i].imag, Nin[i].imag);
+		Acc_i = READ_MAC_SHR0();
+#else
+		register Word32 t, r;
+		t = *ptr++;
+		r = ((t & 0xffff) << 16) >> 16;
+		MLA(r, r);
+		r = t >> 16;
+		MLA(r, r);
+		Acc_r = READ_MAC_SHR0();
+
+		t = *rptr++;
+		r = ((t & 0xffff) << 16) >> 16;
+		MLA(r, r);
+		r = t >> 16;
+		MLA(r, r);
+		Acc_i = READ_MAC_SHR0();
+#endif
+		gamma_echo = min(udiv_32_32(1 + Acc_i, Acc_r), 128); // posteriori SNR ~= Near.^2/Error.^2
+		gain = L_mult(st->gh1[i], st->gh1[i]) >> 16; // Q15
+		xi_echo = L_mult(gain, st->gamma_echo_prev[i]); // Q16
+		xi_echo -= xi_echo >> 6; // TODO: low(0~1) post-snr resolutions improved ??
+		temp = L_mult(max(gamma_echo - 1, 0), 32767); // Q16
+		temp >>= 6;
+		xi_echo += temp;
+		st->gamma_echo_prev[i] = gamma_echo;
+#if 0
+		st->gh1[i] = udiv_64_64(L_add(1, xi_echo), mul_64_64(32767, xi_echo)); // wiener filtering
+#else
+		st->gh1[i] = udiv_64_32(L_add(65536, xi_echo), xi_echo);
+#endif
+		Sout[i].real = sat_32_16(
+				(L_mult(st->gh1[i], Sin[i].real) >> 16) - S_y[i].real);
+		Sout[i].imag = sat_32_16(
+				(L_mult(st->gh1[i], Sin[i].imag) >> 16) - S_y[i].imag);
+	} while (++i < 14);
+}

@@ -1,0 +1,1064 @@
+// This file is part of Eigen, a lightweight C++ template library
+// for linear algebra.
+//
+// Copyright (C) 2009 Benoit Jacob <jacob.benoit.1@gmail.com>
+//
+// This Source Code Form is subject to the terms of the Mozilla
+// Public License v. 2.0. If a copy of the MPL was not distributed
+// with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+// This C++ file compiles to binary code that can be linked to by your C program,
+// thanks to the extern "C" syntax used in the declarations in binary_library.h.
+
+#include <cfloat>
+#include <vector>
+#include <cmath>
+#include <stdint.h>
+
+#include "Eigen/Core"
+#include "Eigen/Dense"
+#include "Eigen/Eigenvalues"
+#include "binary_library.h"
+
+extern "C" {
+#include "type_def.h"
+#include "basic_op.h"
+}
+
+using namespace Eigen;
+namespace util {
+using ::int64_t;
+template<typename T>
+T &real(std::complex<T> &ref) {
+	return reinterpret_cast<T*>(&ref)[0];
+}
+template<typename T>
+T &imag(std::complex<T> &ref) {
+	return reinterpret_cast<T*>(&ref)[1];
+}
+}
+
+/************************* pointer conversion methods **********************************************/
+#if !defined(_MSC_VER)
+typedef std::vector<std::vector<int32_t> > I2_VECTOR;
+typedef Matrix<int64_t, Dynamic, Dynamic> MatrixXi64_t;
+typedef Matrix<int64_t, Dynamic, 1> VectorXi64_t;
+typedef Matrix<std::complex<int64_t>, Dynamic, Dynamic> MatrixXci64_t;
+typedef Matrix<std::complex<int64_t>, Dynamic, 1> VectorXci64_t;
+typedef Matrix<std::complex<int64_t>, 1, Dynamic> RowVectorXci64_t;
+typedef Array<std::complex<int64_t>, Dynamic, Dynamic> ArrayXci64_t;
+template<typename T> struct Traits {
+	typedef T Real;
+};
+typename Traits<int32_t>::Real traits;
+
+////// class MatrixXd //////
+inline MatrixXd& c_to_eigen(C_MatrixXd* ptr) {
+	return *reinterpret_cast<MatrixXd*>(ptr);
+}
+
+inline const MatrixXd& c_to_eigen(const C_MatrixXd* ptr) {
+	return *reinterpret_cast<const MatrixXd*>(ptr);
+}
+
+inline C_MatrixXd* eigen_to_c(MatrixXd& ref) {
+	return reinterpret_cast<C_MatrixXd*>(&ref);
+}
+
+inline const C_MatrixXd* eigen_to_c(const MatrixXd& ref) {
+	return reinterpret_cast<const C_MatrixXd*>(&ref);
+}
+
+////// class Map<MatrixXd> //////
+
+inline Map<MatrixXd>& c_to_eigen(C_Map_MatrixXd* ptr) {
+	return *reinterpret_cast<Map<MatrixXd>*>(ptr);
+}
+
+inline const Map<MatrixXd>& c_to_eigen(const C_Map_MatrixXd* ptr) {
+	return *reinterpret_cast<const Map<MatrixXd>*>(ptr);
+}
+
+inline C_Map_MatrixXd* eigen_to_c(Map<MatrixXd>& ref) {
+	return reinterpret_cast<C_Map_MatrixXd*>(&ref);
+}
+
+inline const C_Map_MatrixXd* eigen_to_c(const Map<MatrixXd>& ref) {
+	return reinterpret_cast<const C_Map_MatrixXd*>(&ref);
+}
+
+////// class MatrixXcf //////
+
+template<typename A, typename B>
+inline A *Eigen_to_C(B &ref) {
+	return (reinterpret_cast<A*>(&ref));
+}
+
+template<typename A, typename B>
+inline A &C_to_Eigen(B *ptr) {
+	return (*reinterpret_cast<A*>(ptr));
+}
+
+/************************* implementation of classes **********************************************/
+
+static void matrix_mul(I2_VECTOR &z, I2_VECTOR &x, I2_VECTOR &y) {
+	int i, j, k;
+	int m = x.size(); //rows
+	int n = x[0].size(); //cols
+	int l = y[0].size();
+	int64_t acc;
+
+	for (i = 0; i < m; i += 1) {
+		for (j = 0; j < l; j += 1) {
+			acc = 0;
+			for (k = 0; k < n; k += 1) {
+				acc += (int64_t) x[i][k] * y[k][j];
+			}
+			z[i][j] = acc;
+		}
+	}
+}
+
+template<typename D, typename S>
+static std::complex<D> cast(const std::complex<S> &s) {
+	return std::complex<D>(s.real(), s.imag()); //anonymous object
+}
+
+void ICA_Decomposition(double *m1, double *result, int L) {
+	int const nIter = 64;
+	int const dim = 12;
+	int i, j;
+	Map<MatrixXd> z(m1, dim, L);
+	Map<MatrixXd> Result(result, dim, dim);
+	int rows = z.rows(), cols = z.cols();
+	double err = 1.f;
+	FILE *pFile = fopen("ica", "wb");
+
+	MatrixXd MatI = MatrixXd::Identity(rows, rows);
+	MatrixXd MatW = MatrixXd::Zero(rows, rows);
+	MatrixXd MatP = MatrixXd::Zero(rows, rows);
+
+	MatrixXd b, p, q;
+	VectorXd w;
+	VectorXd eigens(rows), diags(rows);
+	z -= z.rowwise().mean().replicate(1, cols); //(z-u)
+
+	MatrixXd MatCov = z * z.transpose() / L;
+
+	for (i = 0; i < rows; i += 1) {
+		w = MatI.col(i);
+		for (j = 0; j < nIter; j += 1) {
+			w = MatCov * w;
+			w -= MatW * (MatW.transpose() * w);
+			w = w.normalized();
+		}
+		MatW.col(i) = w;
+	}
+	MatCov *= MatW; //A*[v1,v2]=[v1*v2]*D,[|A*v1|,A*v2]=[d1*|v1|,d2*v2]
+	for (i = 0; i < rows; i += 1) {
+		eigens[i] = MatCov.col(i).array().abs().sum()
+				/ std::max<double>(MatW.col(i).array().abs().sum(),
+				FLT_EPSILON);
+	}
+	diags = eigens.array().rsqrt().matrix();
+	MatCov = diags.asDiagonal() * MatW.transpose();
+	z = MatCov * z; //whitening process
+	MatW = MatrixXd::Identity(rows, rows);
+	do {
+		q = p = MatW.transpose() * z; //[w1'*z;w2'*z]
+		p = p.array().cube().matrix(); //G(W'*z)
+		p = z * p.transpose() / L; //E[z*G(W'*z)']
+		q = 3 * q.array().square().matrix(); //g(W'*z)
+		q = q * MatrixXd::Identity(L, 1) / L; //E[g(W'*z)]
+		MatW = p - MatW * q.asDiagonal(); //v*D,E[G(W'*z)]-E[g(W'*z)]*w
+		b = MatW.transpose() * MatW; //W'*W=v*D*v'
+		EigenSolver<MatrixXd> es(b); //W'*W=v*D^-0.5*v'*(W'*W)*v*D^-0.5*v'=I
+		MatW *= es.eigenvectors().real()
+				* es.eigenvalues().real().array().rsqrt().matrix().asDiagonal()
+				* es.eigenvectors().real().transpose();
+		err = ((MatW.transpose() * MatP).array().abs().matrix()
+				- MatrixXd::Identity(rows, rows)).norm();
+		MatP = MatW;
+	} while (err >= 1E-4);
+	z = MatW.transpose() * z; //ICs
+	Result = MatW.transpose() * MatCov;
+	fclose(pFile);
+}
+
+void matrixxcf_fastica(C_MatrixXcf *m1, C_MatrixXcf *result, int L) {
+	int const nIter = 8;
+	int i = 0, j = 0, k = 0;
+	int rows = C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).rows();
+	typedef std::complex<float> scalar;
+	typedef Array<std::complex<int64_t>, Dynamic, Dynamic> ArrayXXci64_t;
+	MatrixXcf z = C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1); //trained-data
+	MatrixXcf w, matW;
+	MatrixXci64_t MatCov(rows, rows), p(rows, L);
+	MatrixXci64_t MatW(rows, rows), Pw(rows, rows), W(rows, rows), Zt(rows, L);
+
+	w = MatrixXcf::Zero(rows, rows);
+
+	for (i = 0; i < rows; i += 1) {
+		for (j = 0; j < L; j += 1) {
+			scalar *ptr = reinterpret_cast<scalar*>(&z(i, j));
+			ptr[0] = std::complex<float>(
+					static_cast<float>(float2q15(util::real<float>(ptr[0]))),
+					static_cast<float>(float2q15(util::imag<float>(ptr[0]))));
+		}
+	}
+	p = z.template cast<std::complex<int64_t> >(); //@q15,trained-data
+	MatCov = (p * p.transpose()) / L; //@q30
+	MatW = 32768 * MatrixXci64_t::Identity(rows, rows);
+
+	for (i = 0; i < nIter; i += 1) {
+		ArrayXXci64_t array;
+		Pw = MatCov * MatW; //[p1,p2]=[Rc*w1,Rc*w2],@q30
+		for (j = 0; j < rows; j += 1, k = 0) {
+			do {
+				util::real<int64_t>(Pw(j, k)) += 0x20000000;
+				util::imag<int64_t>(Pw(j, k)) += 0x20000000;
+				util::real<int64_t>(Pw(j, k)) >>= 30;
+				util::imag<int64_t>(Pw(j, k)) >>= 30;
+			} while (++k < rows);
+		}
+		Zt = MatW.adjoint() * p; // y=W'*z=[z1,...zN],@q30
+		for (j = 0; j < rows; j += 1, k = 0) {
+			do {
+				util::real<int64_t>(Zt(j, k)) >>= 15;
+				util::imag<int64_t>(Zt(j, k)) >>= 15;
+			} while (++k < L);
+		}
+		array = Zt.adjoint().array();
+		array *= array.abs2().eval(); //@q30
+		for (j = 0; j < L; j += 1, k = 0) {
+			do {
+				util::real<int64_t>(array(j, k)) >>= 30;
+				util::imag<int64_t>(array(j, k)) >>= 30;
+			} while (++k < rows);
+		}
+		W = p * array.matrix() / 32768 / L;
+		W -= 2 * MatW;
+		W -= (Pw.conjugate()
+				* ((MatW.transpose() * Pw) / 32768).diagonal().asDiagonal())
+				/ 32768;
+		for (j = 0; j < rows; j += 1, k = 0) {
+			do {
+				w(j, k) = cast<float, int64_t>(W(j, k));
+			} while (++k < rows);
+		}
+		w /= 32768.f;
+		matW = w.adjoint() * w;
+		MatrixXcf_orthonormal(reinterpret_cast<C_MatrixXcf*>(&matW),
+				reinterpret_cast<C_MatrixXcf*>(&matW));
+		matW = (w *= matW) * 32768.f;
+		MatW = matW.template cast<std::complex<int64_t> >();
+	}
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = w.adjoint();
+}
+
+void MatrixXcf_FastICA(C_MatrixXcf *m1, C_MatrixXcf *result, int L) {
+
+	matrixxcf_fastica(m1, result, L);
+	return;
+
+	int const nIter = 8;
+	int i = 0, j = 0, k = 0;
+	int rows = C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).rows();
+	typedef std::complex<float> scalar;
+
+	MatrixXcf const MatI = MatrixXcf::Identity(rows, rows); //z=(V*A)*s,E[z*z']=E[V*A*s*s'*(V*A)']=I
+	MatrixXcf MatW; //y=b'*(V*A)*s,E[|y|^2]=1=b'*(V*A)*s*s'*(V*A)'*b=q'q=b'b=1
+	MatrixXcf z = C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1); //norm(w)^2=1
+	MatrixXcf MatCov = (z * z.transpose()) / L; //(z*z.')/L
+	RowVectorXcf zt(L); //zt=w'*z
+	VectorXcf pw(rows); //PhatW=Phat*w
+	VectorXcf w(rows); //W*(z=(V*A)*s)=P*D*s,W*V*A=P*D,A=inv(W*V)*P*D,A*D^-1*P=[h1,h2]*[d1,0;0,d2]*[0,1;1,0]
+	VectorXcf wr(rows);
+	VectorXcf eigens(rows); ///[h1/d1,h2/d2]*[0,1;1,0]=[h2/d2,h1/d1]
+	MatW = MatrixXcf::Zero(rows, rows);
+
+#if 1
+	for (i = 0; i < rows; i += 1) {
+		for (j = 0; j < L; j += 1) {
+			scalar *ptr = reinterpret_cast<scalar*>(&z(i, j));
+			util::real<float>(ptr[0]) = float2q15(util::real<float>(ptr[0]));
+			util::imag<float>(ptr[0]) = float2q15(util::imag<float>(ptr[0]));
+		}
+	}
+	MatrixXci64_t res, p = z.template cast<std::complex<int64_t> >();
+	MatrixXci_FastICA(reinterpret_cast<C_MatrixXci64_t*>(&p),
+			reinterpret_cast<C_MatrixXci64_t*>(&res), L);
+	for (i = 0; i < rows; i += 1) {
+		for (j = 0; j < rows; j += 1) {
+			MatW(i, j) = ::cast<float, int64_t>(
+					std::complex<int64_t>(res(i, j)));
+		}
+	}
+	MatW /= 32768.f;
+#else
+#if 0
+	MatrixXcf Pw;
+	MatrixXcf Zt;
+	MatrixXcf W;
+
+	MatW = MatrixXcf::Identity(rows, rows);
+	for (i = 0; i < nIter; i += 1) {
+		ArrayXXcf array;
+		Pw = MatCov * MatW; //[P*w1,P*w2]
+		Zt = MatW.adjoint() * z;
+		array = Zt.adjoint().array();
+		array *= array.abs2().eval();
+		W = (z * array.matrix()) / L - 2 * MatW;
+		W -= Pw.conjugate() * (MatW.transpose() * Pw).diagonal().asDiagonal();
+		MatW = W.adjoint() * W;
+#if 1
+		MatrixXcf_orthonormal(reinterpret_cast<C_MatrixXcf*>(&MatW),
+				reinterpret_cast<C_MatrixXcf*>(&MatW));
+		MatW = W *= MatW;
+#else
+		MatrixXcf mat_w = MatrixXcf::Zero(rows, rows); //orthonormal-basis
+		for (j = 0; j < rows; j += 1, k = 0) {
+			w = MatI.col(j);
+			do {
+				w = MatW * w; //w=Rc*w
+				w -= mat_w * (mat_w.adjoint() * w);//[v1,v2]*[v1'*w;v2'w]
+				w = w.normalized().eval();
+			}while (++k < 16);
+			mat_w.col(j) = w;
+		}
+		MatW *= mat_w; //A*v=[v1,v2]*[d1,0;0,d2]=[v1*d1,v2*d2]
+		for (j = 0; j < rows; j += 1) {
+			eigens[j] = MatW.col(j).array().abs().sum()
+			/ std::max<float>(mat_w.col(j).array().abs().sum(),
+					FLT_EPSILON);
+		}
+		MatW = W *= mat_w
+		* (eigens.array().rsqrt().matrix().asDiagonal()
+				* mat_w.adjoint()); //W'*W=v*D*v',v*D*v'*(W'*W)*v*D*v'=I
+#endif
+	}
+#else
+	for (i = 0; i < rows; i += 1) {
+		ArrayXcf array(L, 1);
+		w = MatI.col(i);
+		for (j = 0; j < nIter; j += 1) {
+			pw = MatCov * w; //Phat*w
+			zt = w.adjoint() * z;//zt=w'*z;
+			array = zt.adjoint().array();
+			array *= array.abs2().eval();
+			w = (z * array.matrix()) / L - 2 * (wr = w);
+			w -= pw.conjugate() * (wr.transpose() * pw);//z*(zt'.*abs(zt').^2)/L-2*w-conj(PhatW)*(w.'*PhatW)
+			w -= MatW * (MatW.adjoint() * w);//b*(b'*w)
+			w = w.normalized().eval();
+		}
+		MatW.col(i) = w;
+	}
+#endif
+#endif
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = MatW.adjoint();
+}
+
+void MatrixXci_FastICA(C_MatrixXci64_t *m1, C_MatrixXci64_t *result, int L) {
+	int const nIter = 8;
+	int rows;
+	int i, j, k;
+	typedef std::complex<int64_t> scalar;
+	int16_t tmp16no1, tmp16no2;
+	int64_t tmp64no1, tmp64no2;
+
+	MatrixXci64_t z = C_to_Eigen<MatrixXci64_t, C_MatrixXci64_t>(m1);
+	rows = z.rows();
+	MatrixXci64_t MatCov = (z * z.transpose()) / L; //@q30
+	RowVectorXci64_t zt(L); //w'*z
+	VectorXci64_t pw(rows);
+	VectorXci64_t w(rows); //@q15
+	VectorXci64_t wr(rows);
+	MatrixXci64_t MatI = MatrixXci64_t::Identity(rows, rows);
+	MatrixXci64_t MatW = MatrixXci64_t::Zero(rows, rows);
+	ArrayXci64_t array(L, 1); //zt'.*abs(zt').^2
+
+	for (i = 0; i < rows; i += 1) {
+		w = MatI.col(i);
+		w *= 32768; //w=I(:,i)*32768;
+		for (j = 0; j < nIter; j += 1) {
+			int64_t norm2;
+			pw = MatCov * w; //v=Phat*w,@q45
+			for (k = 0; k < rows; k += 1) {
+				scalar *ptr = reinterpret_cast<scalar*>(&pw[k]);
+				util::real<int64_t>(ptr[0]) += 0x20000000;
+				util::imag<int64_t>(ptr[0]) += 0x20000000;
+				util::real<int64_t>(ptr[0]) >>= 30;
+				util::imag<int64_t>(ptr[0]) >>= 30;
+			}
+			zt = w.adjoint() * z; //w'*z,@q30
+			zt /= 32768; //@q15
+			array = zt.adjoint().array(); //zt'
+			array *= (array.abs2().eval() / 32768); //zt'.*abs(zt').^2,@q30
+			array /= 32768; //@q15
+			w = z * array.matrix() / 32768 / L - 2 * (wr = w);
+			w -= pw.conjugate() * (wr.transpose() * pw / 32768) / 32768;
+			pw = MatW.adjoint() * w;
+			pw /= 32768;
+			w -= MatW * pw / 32768; //w./norm(w)
+			norm2 = std::max<int64_t>(static_cast<int64_t>(w.norm()), 1);
+			tmp16no2 = CLZ64(norm2 ^ norm2 << 1);
+			tmp64no2 = norm2 << tmp16no2;
+			for (k = 0; k < rows; k += 1) {
+				int64_t uReal, uImag;
+				scalar *ptr = reinterpret_cast<scalar*>(&w[k]);
+				uReal = llabs(util::real<int64_t>(ptr[0]));
+				uImag = llabs(util::imag<int64_t>(ptr[0]));
+
+				tmp16no1 = CLZ64(uReal ^ uReal << 1);
+				tmp64no1 = uReal << tmp16no1;
+				if (tmp64no1 > tmp64no2) {
+					tmp64no1 -= tmp64no2;
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+					tmp64no1 += 32767;
+				} else {
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+				}
+				//tmp64no1 = asr(tmp64no1, tmp16no1 - tmp16no2);
+				tmp16no1 - tmp16no2 >= 0 ?
+						tmp64no1 >>= tmp16no1 - tmp16no2 :
+						tmp64no1 <<= tmp16no2 - tmp16no1;
+
+				util::real<int64_t>(ptr[0]) =
+						util::real<int64_t>(ptr[0]) >= 0 ? tmp64no1 : -tmp64no1;
+
+				tmp16no1 = CLZ64(uImag ^ uImag << 1);
+				tmp64no1 = uImag << tmp16no1;
+				if (tmp64no1 > tmp64no2) {
+					tmp64no1 -= tmp64no2;
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+					tmp64no1 += 32767;
+				} else {
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+				}
+				//tmp64no1 = asr(tmp64no1, tmp16no1 - tmp16no2);
+				tmp16no1 - tmp16no2 >= 0 ?
+						tmp64no1 >>= tmp16no1 - tmp16no2 :
+						tmp64no1 <<= tmp16no2 - tmp16no1;
+				util::imag<int64_t>(ptr[0]) =
+						util::imag<int64_t>(ptr[0]) >= 0 ? tmp64no1 : -tmp64no1;
+			}
+		}
+		MatW.col(i) = w;
+	}
+	C_to_Eigen<MatrixXci64_t, C_MatrixXci64_t>(result) = MatW;
+}
+
+void MatrixXi_PCA(C_MatrixXi64_t *m1, C_MatrixXi64_t *result,
+		C_MatrixXi64_t *m_eivalues) {
+	int const nIter = 16;
+	int i, j, k;
+	int rows = C_to_Eigen<MatrixXi64_t, C_MatrixXi64_t>(m1).rows();
+	int cols = C_to_Eigen<MatrixXi64_t, C_MatrixXi64_t>(m1).cols();
+	int64_t tmp64no1, tmp64no2;
+	int16_t tmp16no1, tmp16no2;
+
+	MatrixXi64_t MatCov = C_to_Eigen<MatrixXi64_t, C_MatrixXi64_t>(m1);
+	MatrixXi64_t MatW(rows, cols);
+	MatrixXi64_t Mateye(rows, cols);
+	VectorXi64_t colvctor(rows);
+	VectorXi64_t eivalues(rows);
+	VectorXi64_t evals(rows);
+
+	Mateye = MatrixXi64_t::Identity(rows, cols);
+	MatW = MatrixXi64_t::Zero(rows, cols);
+	for (i = 0; i < rows; i += 1) {
+		colvctor = Mateye.col(i);
+		colvctor *= 32768;
+		for (j = 0; j < nIter; j += 1) {
+			int64_t norm2;
+			colvctor = MatCov * colvctor; //@q15
+			evals = MatW.adjoint() * colvctor;
+			evals /= 32768; //@q15
+			evals = MatW * evals;
+			evals /= 32768; //@q15
+			colvctor -= evals;
+			norm2 = std::max<int64_t>(static_cast<int64_t>(colvctor.norm()), 1);
+			tmp16no2 = CLZ64(norm2 ^ norm2 << 1);
+			tmp64no2 = norm2 << tmp16no2;
+
+			for (k = 0; k < rows; k += 1) {
+				int64_t *ptr = reinterpret_cast<int64_t*>(&colvctor[k]);
+				tmp64no1 = llabs(ptr[0]);
+				tmp16no1 = CLZ64(tmp64no1 ^ tmp64no1 << 1);
+				tmp64no1 <<= tmp16no1;
+				if (tmp64no1 > tmp64no2) {
+					tmp64no1 -= tmp64no2;
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+					tmp64no1 += 32767;
+				} else {
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+				}
+				tmp64no1 = asr(tmp64no1, tmp16no1 - tmp16no2);
+				ptr[0] = ptr[0] > 0 ? tmp64no1 : -tmp64no1;
+			}
+		}
+		MatW.col(i) = colvctor;
+	}
+	MatCov *= MatW; //Rc*v=D*v
+	for (i = 0; i < rows; i += 1) {
+		eivalues[i] = (MatCov.col(i).array().abs().sum() << 15)
+				/ std::max<int64_t>(
+						static_cast<int64_t>(MatW.col(i).array().abs().sum()),
+						1);
+	}
+	C_to_Eigen<MatrixXi64_t, C_MatrixXi64_t>(result) = MatW;
+	C_to_Eigen<MatrixXi64_t, C_MatrixXi64_t>(m_eivalues) = eivalues;
+}
+
+void matrixxci_pca(C_MatrixXci64_t *m1, C_MatrixXci64_t *result,
+		C_MatrixXci64_t *m_eivalues) {
+	int const nIter = 16;
+	int rows, cols;
+	int i, j, k;
+	typedef std::complex<int64_t> scalar;
+
+	MatrixXci64_t MatCov = C_to_Eigen<MatrixXci64_t, C_MatrixXci64_t>(m1);
+	rows = MatCov.rows(); //@q15
+	cols = MatCov.cols();
+
+	MatrixXci64_t MatW(rows, cols);
+	MatrixXci64_t MatI(rows, cols);
+	VectorXci64_t colvctor(rows);
+	VectorXci64_t evals(rows);
+	VectorXci64_t eivalues(rows);
+	VectorXci64_t diags(rows);
+
+	MatI = MatrixXci64_t::Identity(rows, cols);
+	MatW = MatrixXci64_t::Zero(rows, cols);
+	for (i = 0; i < rows; i += 1) {
+		int16_t tmp16no1, tmp16no2;
+		int64_t tmp64no1, tmp64no2;
+		colvctor = MatI.col(i);
+		colvctor *= 32768;
+		for (j = 0; j < nIter; j += 1) {
+			int64_t norm2;
+			colvctor = MatCov * colvctor; //@q45
+			for (k = 0; k < rows; k += 1) {
+				scalar *ptr = reinterpret_cast<scalar*>(&colvctor[k]);
+				util::real<int64_t>(ptr[0]) >>= 15;
+				util::imag<int64_t>(ptr[0]) >>= 15;
+			}
+			evals = MatW.adjoint() * colvctor; //inner-product,@q45
+			for (k = 0; k < rows; k += 1) {
+				scalar *ptr = reinterpret_cast<scalar*>(&evals[k]);
+				util::real<int64_t>(ptr[0]) >>= 15;
+				util::imag<int64_t>(ptr[0]) >>= 15;
+			}
+			evals = MatW * evals; //linear-transform,@q45
+			for (k = 0; k < rows; k += 1) {
+				scalar *ptr = reinterpret_cast<scalar*>(&evals[k]);
+				util::real<int64_t>(ptr[0]) >>= 15;
+				util::imag<int64_t>(ptr[0]) >>= 15;
+			}
+			colvctor -= evals;
+			for (k = 0; k < rows; k += 1) {
+				scalar *ptr = reinterpret_cast<scalar*>(&colvctor[k]);
+				util::real<int64_t>(ptr[0]) += 0x4000;
+				util::imag<int64_t>(ptr[0]) += 0x4000;
+				util::real<int64_t>(ptr[0]) >>= 15;
+				util::imag<int64_t>(ptr[0]) >>= 15;
+			}
+			norm2 = std::max<int64_t>(static_cast<int64_t>(colvctor.norm()), 1); //@q15
+			tmp16no2 = CLZ64(norm2 ^ norm2 << 1);
+			tmp64no2 = norm2 << tmp16no2;
+			for (k = 0; k < rows; k += 1) {
+				int64_t uReal, uImag;
+				scalar *ptr = reinterpret_cast<scalar*>(&colvctor[k]);
+				uReal = llabs(util::real<int64_t>(ptr[0]));
+				uImag = llabs(util::imag<int64_t>(ptr[0]));
+				tmp16no1 = CLZ64(uReal ^ uReal << 1);
+				tmp64no1 = uReal << tmp16no1;
+				if (tmp64no1 > tmp64no2) {
+					tmp64no1 -= tmp64no2;
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+					tmp64no1 += 32767;
+				} else {
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+				}
+				//tmp64no1 = asr(tmp64no1, tmp16no1 - tmp16no2);
+				tmp16no1 - tmp16no2 >= 0 ?
+						tmp64no1 >>= tmp16no1 - tmp16no2 :
+						tmp64no1 <<= tmp16no2 - tmp16no1;
+				util::real<int64_t>(ptr[0]) =
+						util::real<int64_t>(ptr[0]) >= 0 ? tmp64no1 : -tmp64no1;
+				tmp16no1 = CLZ64(uImag ^ uImag << 1);
+				tmp64no1 = uImag << tmp16no1;
+				if (tmp64no1 > tmp64no2) {
+					tmp64no1 -= tmp64no2;
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+					tmp64no1 += 32767;
+				} else {
+					tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+				}
+				//tmp64no1 = asr(tmp64no1, tmp16no1 - tmp16no2);
+				tmp16no1 - tmp16no2 >= 0 ?
+						tmp64no1 >>= tmp16no1 - tmp16no2 :
+						tmp64no1 <<= tmp16no2 - tmp16no1;
+				util::imag<int64_t>(ptr[0]) =
+						util::imag<int64_t>(ptr[0]) >= 0 ? tmp64no1 : -tmp64no1;
+			}
+		}
+		MatW.col(i) = colvctor;
+	}
+	MatCov *= MatW; ///@q45
+	for (i = 0; i < rows; i += 1) {
+		int16_t tmp16no1, tmp16no2;
+		int64_t tmp64no1, tmp64no2;
+		scalar *ptr = reinterpret_cast<scalar*>(&eivalues[i]);
+		ptr[0] = MatCov.col(i).array().abs().sum();
+		tmp64no1 = util::real<int64_t>(ptr[0]);
+		ptr[0] = MatW.col(i).array().abs().sum();
+		tmp64no2 = std::max<int64_t>(util::real<int64_t>(ptr[0]), 1);
+#if 1
+		tmp64no1 /= tmp64no2;
+		tmp64no1 >>= 15;
+#else
+		tmp16no1 = CLZ64(tmp64no1 ^ tmp64no1 << 1);
+		tmp16no2 = CLZ64(tmp64no2 ^ tmp64no2 << 1);
+		tmp64no1 <<= tmp16no1;
+		tmp64no2 <<= tmp16no2;
+		if (tmp64no1 > tmp64no2) {
+			tmp64no1 -= tmp64no2;
+			tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+			tmp64no1 += 32767;
+		} else {
+			tmp64no1 = udiv_128_64(tmp64no2, tmp64no1);
+		}
+		tmp16no1 - tmp16no2 >= 0 ?
+		tmp64no1 >>= tmp16no1 - tmp16no2 :
+		tmp64no1 <<= tmp16no2 - tmp16no1;
+		tmp64no1 += 0x20000000;
+		tmp64no1 >>= 30;
+#endif
+		util::real<int64_t>(ptr[0]) = tmp64no1;
+		util::imag<int64_t>(ptr[0]) = 0;
+		diags[i] = 0x800000 / sqrtf(std::max<int64_t>(tmp64no1 << 1, 1));
+	}
+	MatCov = MatW.adjoint();
+	MatW = diags.asDiagonal() * MatCov;
+	C_to_Eigen<MatrixXci64_t, C_MatrixXci64_t>(result) = MatW; ///@q30
+	C_to_Eigen<MatrixXci64_t, C_MatrixXci64_t>(m_eivalues) = eivalues;
+}
+
+void MatrixXci_PCA(C_MatrixXci64_t *m1, C_MatrixXci64_t *result,
+		C_MatrixXci64_t *m_eivalues) {
+	typedef std::complex<int64_t> scalar;
+	int const nIter = 16;
+	int i, j, k;
+	int rows, cols;
+
+	MatrixXci64_t MatCov = C_to_Eigen<MatrixXci64_t, C_MatrixXci64_t>(m1);
+	rows = MatCov.rows();
+	cols = MatCov.cols();
+
+	MatrixXci64_t MatW(rows, cols);
+	MatrixXci64_t Mateye(rows, cols);
+	VectorXci64_t colvctor(rows);
+	VectorXci64_t evals(rows);
+	VectorXci64_t eivalues(rows);
+	VectorXci64_t diags(rows);
+
+	Mateye = MatrixXci64_t::Identity(rows, cols);
+	MatW = MatrixXci64_t::Zero(rows, cols);
+	for (i = 0; i < rows; i += 1) {
+		colvctor = Mateye.col(i);
+		colvctor *= 32768;
+		for (j = 0; j < nIter; j += 1) {
+			int64_t norm2;
+			colvctor = MatCov * colvctor; //@q15
+			evals = MatW.adjoint() * colvctor;
+			k = 0;
+			do {
+				scalar *ptr = reinterpret_cast<scalar*>(&evals[k]);
+				util::real<int64_t>(*ptr) >>= 15;
+				util::imag<int64_t>(*ptr) >>= 15;
+			} while (++k < rows);
+			evals = MatW * evals;
+			k = 0;
+			do {
+				scalar *ptr = reinterpret_cast<scalar*>(&evals[k]);
+				util::real<int64_t>(*ptr) >>= 15;
+				util::imag<int64_t>(*ptr) >>= 15;
+			} while (++k < rows);
+			colvctor -= evals;
+			norm2 = colvctor.norm();
+			k = 0;
+			do {
+				scalar *ptr = reinterpret_cast<scalar*>(&colvctor[k]);
+				util::real<int64_t>(*ptr) <<= 15;
+				util::imag<int64_t>(*ptr) <<= 15;
+				util::real<int64_t>(*ptr) /= std::max<int64_t>(norm2, 1);
+				util::imag<int64_t>(*ptr) /= std::max<int64_t>(norm2, 1);
+			} while (++k < rows);
+		}
+		MatW.col(i) = colvctor;
+	}
+	MatCov *= MatW; //@q15
+	for (i = 0; i < rows; i += 1) {
+		scalar *ptr = reinterpret_cast<scalar*>(&eivalues[i]);
+		eivalues[i] = (MatCov.col(i).array().abs().sum() << 15)
+				/ (MatW.col(i).array().abs().sum()); //@q15
+		diags[i] = 0x800000 / (int64_t) sqrtf(util::real<int64_t>(*ptr) << 1); ///[d1,0;0,d2]*v^H=[v1^H,v2^H]=[d1*v1^H;d2*v2^H]
+	}
+	MatCov = MatW.adjoint();
+	MatW = diags.asDiagonal() * MatCov; //@q30
+
+	C_to_Eigen<MatrixXci64_t, C_MatrixXci64_t>(result) = MatW;
+	C_to_Eigen<MatrixXci64_t, C_MatrixXci64_t>(m_eivalues) = eivalues;
+}
+
+void MatrixXcf_PCA(C_MatrixXcf *m1, C_MatrixXcf *result,
+		C_MatrixXcf *m_eivalues) {
+//std::complex<float> const &a = std::complex<float>(-3.f, 1.f);
+	const int &nIter = 16;
+	int i, j;
+	int rows = C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).rows();
+	int cols = C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).cols();
+#if 0
+	Matrix2cf MatCov = C_to_Eigen<Matrix2cf,C_MatrixXcf>(m1); //covariance
+	Matrix2cf MatW = MatrixXcf::Zero(2, 2);
+	Matrix2cf Mateye = MatrixXcf::Identity(2, 2);
+	Vector2cf colvctor;
+	Vector2cf eivalues;
+	Vector2cf diags;
+
+#else
+	MatrixXcf MatCov = C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1);
+	MatrixXcf MatW(rows, cols);
+	MatrixXcf Mateye(rows, cols);
+	VectorXcf colvctor(rows);
+	VectorXcf eivalues(rows);
+	VectorXcf diags(rows);
+
+	Mateye = MatrixXcf::Identity(rows, cols);
+	MatW = MatrixXcf::Zero(rows, cols);
+#endif
+
+#if 1
+	MatrixXci64_t p(rows, cols);
+	MatrixXci64_t res(rows, cols);
+	MatrixXci64_t eivs(rows, 1);
+
+	MatCov *= 32768.f; ///@q30
+	MatCov *= 32768.f;
+	p = MatCov.template cast<std::complex<int64_t> >();
+	matrixxci_pca(reinterpret_cast<C_MatrixXci64_t*>(&p),
+			reinterpret_cast<C_MatrixXci64_t*>(&res),
+			reinterpret_cast<C_MatrixXci64_t*>(&eivs));
+	for (i = 0; i < rows; i += 1) {
+		for (j = 0; j < cols; j += 1) {
+			MatW(i, j) = cast<float, int64_t>(std::complex<int64_t>(res(i, j)));
+		}
+		eivalues(i) = cast<float, int64_t>(std::complex<int64_t>(eivs(i, 0)));
+	}
+	MatW /= 32768.f;
+	MatW /= 32768.f;
+	eivalues /= 32768.f;
+#else
+	for (i = 0; i < rows; i += 1) {
+		colvctor = Mateye.col(i);
+		for (j = 0; j < nIter; j += 1) {
+			colvctor = MatCov * colvctor; //w=C*w
+			colvctor -= MatW * (MatW.adjoint() * colvctor);//w-=b*(b'*w)
+			colvctor = colvctor.normalized().eval();//w*norm(w)^-1
+		}
+		MatW.block<2, 1>(0, i) = colvctor;
+	}
+	MatCov *= MatW; //C*=b=[d1,0;0,d2]*b=[d1*v1,d2*v2],d1=sum(abs(C(:,1)),1)/sum(abs(x(:,1)),1)
+	for (i = 0; i < cols; i += 1) {
+		float lambda; //(Rc*v=[Rc*v1,Rc*v2])=[v1,v2]*[d1,0;0,d2]=[d1*v1,d2*v2],sum(abs(C(:,1)),1)/sum(abs(v(:,1)),1)
+		lambda = MatCov.col(i).array().abs().sum()
+		/ std::max<float>(
+				static_cast<float>(MatW.col(i).array().abs().sum()),
+				FLT_EPSILON);
+		eivalues[i] = lambda;
+		diags[i] = 1 / sqrtf(std::max<float>(lambda, FLT_EPSILON));
+	}
+	MatCov = MatW.adjoint(); //b'
+	MatW = diags.asDiagonal() * MatCov;//D^-0.5
+#endif
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = MatW;
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(m_eivalues) = eivalues;
+}
+
+void MatrixXcf_SVD(C_MatrixXcf *m1, C_MatrixXcf *result) {
+	MatrixXcf z = C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1);
+	JacobiSVD<MatrixXcf> svd(z, ComputeThinU | ComputeThinV);
+}
+
+template<typename A, typename B>
+A *MatrixXtype_new(int rows, int cols) {
+	typedef Matrix<B, Dynamic, Dynamic> MatB;
+	return (Eigen_to_C<A, MatB>(*new MatB(rows, cols)));
+}
+
+C_MatrixXi64_t *MatrixXi64_t_new(int rows, int cols) {
+	return MatrixXtype_new<C_MatrixXi64_t, int64_t>(rows, cols);
+}
+
+C_MatrixXci64_t *MatrixXci64_t_new(int rows, int cols) {
+	return MatrixXtype_new<C_MatrixXci64_t, std::complex<int64_t> >(rows, cols);
+}
+
+C_MatrixXcf *MatrixXcf_new(int rows, int cols) {
+	return (Eigen_to_C<C_MatrixXcf, MatrixXcf>(*new MatrixXcf(rows, cols)));
+}
+
+void MatrixXi64_t_delete(C_MatrixXi64_t *m) {
+	delete &C_to_Eigen<MatrixXi64_t, C_MatrixXi64_t>(m);
+}
+
+void MatrixXcf_delete(C_MatrixXcf *m) {
+	delete &C_to_Eigen<MatrixXcf, C_MatrixXcf>(m);
+}
+
+void MatrixXcf_resize(C_MatrixXcf *m, int rows, int cols) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(m).resize(rows, cols);
+}
+
+void MatrixXcf_copy(C_MatrixXcf *dst, const C_MatrixXcf *src) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(dst) = C_to_Eigen<const MatrixXcf,
+			const C_MatrixXcf>(src);
+}
+
+void MatrixXcf_set_Identity(C_MatrixXcf *m, int rows, int cols) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(m).setIdentity(rows, cols);
+}
+
+void MatrixXcf_set_Ones(C_MatrixXcf *m, int rows, int cols) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(m).setOnes(rows, cols);
+}
+
+void MatrixXi64_t_set_coeff(C_MatrixXi64_t *m, int i, int j, int64_t coeff) {
+	C_to_Eigen<MatrixXi64_t, C_MatrixXi64_t>(m)(i, j) = coeff;
+}
+
+void MatrixXcf_set_coeff(C_MatrixXcf *m, int i, int j,
+		float __complex__ coeff) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(m)(i, j) = std::complex<float>(coeff);
+}
+
+float _Complex MatrixXcf_get_coeff(const C_MatrixXcf *m, int i, int j) {
+	std::complex<float> a;
+	float _Complex b;
+	a = C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m)(i, j);
+	__real__ b = a.real();
+	__imag__ b = a.imag();
+	return (b);
+}
+
+void MatrixXi64_t_print(const C_MatrixXi64_t *m) {
+	std::cout << C_to_Eigen<const MatrixXi64_t, const C_MatrixXi64_t>(m)
+			<< std::endl;
+}
+
+void MatrixXcf_print(const C_MatrixXcf *m) {
+	std::cout << C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m) << std::endl;
+}
+
+void MatrixXcf_multiply(const C_MatrixXcf *m1, const C_MatrixXcf *m2,
+		C_MatrixXcf *result) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<const MatrixXcf,
+			const C_MatrixXcf>(m1)
+			* C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m2);
+}
+
+void MatrixXcf_add(const C_MatrixXcf *m1, const C_MatrixXcf *m2,
+		C_MatrixXcf *result) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<const MatrixXcf,
+			const C_MatrixXcf>(m1)
+			+ C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m2);
+}
+
+void MatrixXcf_adjoint(const C_MatrixXcf *m1, C_MatrixXcf *result) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<const MatrixXcf,
+			const C_MatrixXcf>(m1).adjoint().eval();
+}
+
+void MatrixXcf_scalar(const C_MatrixXcf *m1, C_MatrixXcf *result,
+		float _Complex coeff) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<const MatrixXcf,
+			const C_MatrixXcf>(m1) * coeff;
+}
+
+void MatrixXcf_norm(C_MatrixXcf const *m, C_MatrixXcf *result) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<const MatrixXcf,
+			const C_MatrixXcf>(m).normalized().eval();
+}
+
+void MatrixXcf_inverse(const C_MatrixXcf *m1, C_MatrixXcf *result) {
+#if 0
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<const MatrixXcf,
+	const C_MatrixXcf>(m1).inverse();
+#else
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) =
+			C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m1).completeOrthogonalDecomposition().pseudoInverse();
+#endif
+}
+
+void MatrixXcf_eigensolver(const C_MatrixXcf *m1, C_MatrixXcf *result,
+		C_MatrixXcf *m_eivalues) {
+	int i, j;
+	int rows = C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m1).rows();
+	int cols = C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m1).cols();
+
+	ComplexEigenSolver<MatrixXcf> es(
+			C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m1));
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(m_eivalues) = es.eigenvalues();
+#if 0
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) =
+	es.eigenvectors().adjoint();
+
+	for (i = 0, j = 0; i < cols; i += 1, j = 0) {
+		std::complex<float> lambda = es.eigenvalues()[i];
+		do {
+			C_to_Eigen<MatrixXcf, C_MatrixXcf>(result)(i, j) /= std::sqrt(
+					std::max<float>(lambda.real(), FLT_EPSILON));
+		}while (++j < rows);
+	}
+#else
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<MatrixXcf,
+			C_MatrixXcf>(m_eivalues).array().rsqrt().matrix().asDiagonal()
+			* es.eigenvectors().adjoint();
+#endif
+}
+
+void MatrixXcf_columnswap(C_MatrixXcf *m1, int i, int j) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).col(i).swap(
+			C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).col(j));
+}
+
+void MatrixXcf_rowswap(C_MatrixXcf *m1, int i, int j) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).row(i).swap(
+			C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).row(j));
+}
+
+void MatrixXcf_transpose(C_MatrixXcf *m1, C_MatrixXcf *result) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<MatrixXcf,
+			C_MatrixXcf>(m1).transpose().eval();
+}
+
+void MatrixXcf_sub(const C_MatrixXcf *m1, const C_MatrixXcf *m2,
+		C_MatrixXcf *result) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<const MatrixXcf,
+			const C_MatrixXcf>(m1)
+			- C_to_Eigen<const MatrixXcf, const C_MatrixXcf>(m2);
+}
+
+void MatrixXcf_diagonal(C_MatrixXcf *m1, C_MatrixXcf *result) {
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = C_to_Eigen<MatrixXcf,
+			C_MatrixXcf>(m1).diagonal().asDiagonal();
+}
+
+void MatrixXcf_orthonormal(C_MatrixXcf *m1, C_MatrixXcf *result) {
+	ComplexEigenSolver<MatrixXcf> es(C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1));
+
+	C_to_Eigen<MatrixXcf, C_MatrixXcf>(result) = es.eigenvectors()
+			* es.eigenvalues().array().rsqrt().matrix().asDiagonal()
+			* es.eigenvectors().adjoint();
+}
+
+float MatrixXcf_cols_norm(C_MatrixXcf *m1) {
+	return (C_to_Eigen<MatrixXcf, C_MatrixXcf>(m1).colwise().lpNorm<1>().maxCoeff());
+}
+
+////// class MatrixXd //////
+C_MatrixXd* MatrixXd_new(int rows, int cols) {
+	return eigen_to_c(*new MatrixXd(rows, cols));
+}
+
+void MatrixXd_delete(C_MatrixXd *m) {
+	delete &c_to_eigen(m);
+}
+
+double* MatrixXd_data(C_MatrixXd *m) {
+	return c_to_eigen(m).data();
+}
+
+void MatrixXd_set_zero(C_MatrixXd *m) {
+	c_to_eigen(m).setZero();
+}
+
+void MatrixXd_resize(C_MatrixXd *m, int rows, int cols) {
+	c_to_eigen(m).resize(rows, cols);
+}
+
+void MatrixXd_copy(C_MatrixXd *dst, const C_MatrixXd *src) {
+	c_to_eigen(dst) = c_to_eigen(src);
+}
+
+void MatrixXd_copy_map(C_MatrixXd *dst, const C_Map_MatrixXd *src) {
+	c_to_eigen(dst) = c_to_eigen(src);
+}
+
+void MatrixXd_set_coeff(C_MatrixXd *m, int i, int j, double coeff) {
+	c_to_eigen(m)(i, j) = coeff;
+}
+
+double MatrixXd_get_coeff(const C_MatrixXd *m, int i, int j) {
+	return c_to_eigen(m)(i, j);
+}
+
+void MatrixXd_print(const C_MatrixXd *m) {
+	std::cout << c_to_eigen(m) << std::endl;
+}
+
+void MatrixXd_multiply(const C_MatrixXd *m1, const C_MatrixXd *m2,
+		C_MatrixXd *result) {
+	c_to_eigen(result) = c_to_eigen(m1) * c_to_eigen(m2);
+}
+
+void MatrixXd_add(const C_MatrixXd *m1, const C_MatrixXd *m2,
+		C_MatrixXd *result) {
+	c_to_eigen(result) = c_to_eigen(m1) + c_to_eigen(m2);
+}
+
+////// class Map_MatrixXd //////
+
+C_Map_MatrixXd* Map_MatrixXd_new(double *array, int rows, int cols) {
+	return eigen_to_c(*new Map<MatrixXd>(array, rows, cols));
+}
+
+void Map_MatrixXd_delete(C_Map_MatrixXd *m) {
+	delete &c_to_eigen(m);
+}
+
+void Map_MatrixXd_set_zero(C_Map_MatrixXd *m) {
+	c_to_eigen(m).setZero();
+}
+
+void Map_MatrixXd_copy(C_Map_MatrixXd *dst, const C_Map_MatrixXd *src) {
+	c_to_eigen(dst) = c_to_eigen(src);
+}
+
+void Map_MatrixXd_copy_matrix(C_Map_MatrixXd *dst, const C_MatrixXd *src) {
+	c_to_eigen(dst) = c_to_eigen(src);
+}
+
+void Map_MatrixXd_set_coeff(C_Map_MatrixXd *m, int i, int j, double coeff) {
+	c_to_eigen(m)(i, j) = coeff;
+}
+
+double Map_MatrixXd_get_coeff(const C_Map_MatrixXd *m, int i, int j) {
+	return c_to_eigen(m)(i, j);
+}
+
+void Map_MatrixXd_print(const C_Map_MatrixXd *m) {
+	std::cout << c_to_eigen(m) << std::endl;
+}
+
+void Map_MatrixXd_multiply(const C_Map_MatrixXd *m1, const C_Map_MatrixXd *m2,
+		C_Map_MatrixXd *result) {
+	c_to_eigen(result) = c_to_eigen(m1) * c_to_eigen(m2);
+}
+
+void Map_MatrixXd_add(const C_Map_MatrixXd *m1, const C_Map_MatrixXd *m2,
+		C_Map_MatrixXd *result) {
+	c_to_eigen(result) = c_to_eigen(m1) + c_to_eigen(m2);
+}
+#endif

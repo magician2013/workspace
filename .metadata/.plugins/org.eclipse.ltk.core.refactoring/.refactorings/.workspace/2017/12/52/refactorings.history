@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Delete resource &apos;openal/Debug/openal.exe&apos;" deleteContents="false" description="Delete resource &apos;openal/Debug/openal.exe&apos;" element1="/openal/Debug/openal.exe" flags="7" id="org.eclipse.ltk.core.refactoring.delete.resources" resources="1" stamp="1514272715452"/>
+</session>

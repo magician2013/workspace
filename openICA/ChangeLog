@@ -1,0 +1,60 @@
+2008-11-04  Takahashi Yuu  <yuu-t@spacy6.naist.jp>
+
+	* Permutation solving methods is changed.
+	  New method utilize only unmixing matrix.
+
+2008-09-01  Takahashi Yuu  <yuu-t@spacy6.naist.jp>
+
+	* Release 0.0.4
+
+	* Bug fixed: output signals are incorrect in bt_ica.
+	  In bt_ica, four signals are output, e.g., y11.raw, y12.raw, y21.raw y22.raw.
+	  However, in older version of bt_ica, y11.raw and y12.raw, or y21.raw and y22.raw
+	  became the same signal. This bug is fixed.
+
+	* Additional option:
+	  In Release 0.0.3, the following option is also avaiable for 'rt_ica'.
+	  I forgot to write this one.
+
+	  --it:        Iterations of ICA for raw-input mode.
+	
+2008-08-19  Takahashi Yuu  <yuu-t@spacy6.naist.jp>
+
+	* Release 0.0.3
+	* File I/O mode for `rt_ica' are added.
+
+	  In the previous version, rt_ica can only read from audio device 
+	  and output separeted signals to audio device.
+	  
+	  In the new version, rt_ica can read from stereo raw file and output
+	  separated signals to stereo raw file.
+	
+	* The following new options are added for `rt_ica'
+
+	  -f, --input:  use specified stereo raw file instead of audio input
+	  -o, --output: output to specified file instead of audio output
+	  --mode:       default output mode [ICA]
+	                In the previous version, we can only select
+	                THROUGH/ICA mode by keyboard.
+	                In this version, we can select mode by command line
+	                option.
+	  --source:     default target source index for ICA [0].
+	                In the previous version, we can only select
+	                which separated signal by keyboard.
+	                In this version, we can select the separaeted signal
+	                by command line option.
+	
+	* Note: separation performance is `not' improved.
+	
+2008-08-04  Takahashi Yuu  <yuu-t@is.naist.jp>
+
+	* Release 0.0.2
+	* Some description error about 2D std::vector,e.g., D2_VECOTR, are fixed.
+	  (This modification enables us to compile with newer g++)
+	* All vector or matrix is declared as std::vector based type.
+	* The performance is `not' improved.
+	
+2008-01-15  Takahashi Yuu  <yuu-t@is.naist.jp>
+
+	* Release 0.0.1
+

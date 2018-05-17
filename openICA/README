@@ -1,0 +1,141 @@
+========================================================================
+                               Open ICA
+        Implementation of independent component analysis (ICA) 
+        for acoustic blind source separation (BSS).
+
+ Copyright (c) 2008 Yu Takahashi, Shikano-Lab.,
+                    Nara Institute of Science and Technology
+------------------------------------------------------------------------
+
+About
+------
+"Open ICA" is an implementation of blind source separation (BSS) for 
+acoustic sound sources based on frequency-domain independent component 
+analysis (FDICA). Open ICA use infomax-type FDICA.
+"Open ICA" includes the following programs:
+
+ 1. bt_ica (batch algorithm)
+   A batch algorithm for FDICA-based BSS using higher-order statistics.
+   This program processes recorded audio files (only 'raw' file is supported),
+   and output separated signals.
+
+ 2. rt_ica (real-time (block wise batch) algorithm)
+   A block wise batch algorithm for FDICA-based BSS using higher-order
+   statistics. 
+   This program processes the audio device's input and outputs the
+   separated signals from audio device's output in real-time.
+   This programs uses sound API as OSS API.
+
+ 3. mk_nbf
+   An initial separation matrix generator based on null beamformer.
+
+These programs are implemented based on C/C++, and supports only 
+Linux platforms. 
+
+
+Requirements
+-------------
+Open ICA is tested in the following environment. No test is 
+conducted another environment.
+
+ OS:        Debian/GNU Linux 4.0 (etch)
+ Compiler:  g++(GCC) 4.1.2 20061115 (Debian 4.1.1-21)
+ CPU:       Intel(R) Xeon(TM) X5355 (Quad Core)
+ RAM:       2G bytes
+ Audio:     RME Hammerfall DSP + Multiface
+ Microphone: OMNI-directional Sony ECM-C115 x 2
+             Amp: Audio technica AT-MA2
+
+If the following requirements are satisfied,
+it may work normally.
+
+ CPU:       Supports SMP (multi core is desirable)
+            (for block wise algorithm)
+ RAM:       free 64M bytes physical space
+ Endian:    little endian
+ Audio:     supports OSS API(alsa-oss),
+            full-duplex I/O mode,
+            stereo input/output,
+            16 kHz sampling,
+            little endian,
+            and 16 bits quantization.
+            (for block wise algorithm)
+ Libs:      libm
+            libpthread
+
+
+Contents of Open ICA
+---------------------
+ README     Readme (This file)
+ README.ja  Readme in Japanese
+ LICENCE    Terms and condition for use
+ LICENCE.ja Terms and condition for use in Japanese
+ ChangeLog  Release note
+ Makefile   Makefile for build
+ config.hh  configures for build
+ Usage.txt  all options are shown
+ bt_ica/    sources for batch algorithm
+ rt_ica/    sources for block wise batch algorithm
+ mk_nbf/    sources for initial matrix generator
+ lib/       sources for libmathtool
+
+
+Build
+------
+ Just make as follows in the OpenICA directory.
+
+ $ make
+
+ And, if you want to rebuild or clean, make as follows.
+
+ $ make rebuild
+ 
+ or
+ 
+ $ make clean
+
+ If you want to enter the debug mode, editing the config file  and enable 
+ "#define __DEBUG".  However, in the debug mode, any useful information 
+ is not obtained now.
+ 
+ Moreover, we can change accuracy of floating point  accuracy with 
+ change the definition of the type 'FLOAT' in config.hh.  Note that
+  'float' as FLOAT is not tested sufficiently.
+
+
+Note
+-----
+ Open ICA is not sufficiently tested.
+ It may contains many bugs, and no optimized codes.
+ Also, I use C++ as a just extended or useful C.
+ Then, the code is not object oriented.
+
+
+Usage
+------
+ Please refer to Usage.txt
+
+Known issues
+-------------
+ * In some audio devices or systems, noisy output ocurrs in "rt_ica".
+
+   "rt_ica" set the very small fragment size of the audio I/O to work.
+   Very small fragment causes noisy output because of overhead of 'write system' call.
+  
+
+Licence
+--------
+Open ICA is an open-source software provided as is.
+For more detailed information about the licence, refer to "LICENCE".
+
+
+Acknowledgement
+----------------
+I would like to thank all researchers of ICA and Shikano-Lab. members.
+
+
+Contact Us
+===========
+
+  Yu Takahashi, Shikano-Lab, Nara Institute of Science and Technology.
+  yuu-t@is.naist.jp
