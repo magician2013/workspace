@@ -1,1 +1,6 @@
-Info: Nothing to build for openal
+16:51:54 **** Incremental Build of configuration Debug for project openal ****
+Info: Internal Builder is used for build
+g++ -o openal.exe CWaves.o Capture.o Framework.o LoadOAL.o aldlist.o "C:\\Program Files (x86)\\OpenAL 1.1 SDK\\libs\\Win64\\OpenAL32.lib" "C:\\Program Files\\Microsoft SDKs\\Windows\\v7.0\\Lib\\x64\\WinMM.Lib" "E:\\subband_aec\\Debug\\libsubband_aec.a" "..\\..\\eigens\\Debug\\libeigens.a" "..\\..\\webrtc_vad\\Debug\\libwebrtc_vad.a" 
+
+16:51:59 Build Finished (took 5s.345ms)
+

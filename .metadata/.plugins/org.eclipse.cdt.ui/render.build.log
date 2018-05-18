@@ -1,1 +1,6 @@
-Info: Nothing to build for render
+16:52:00 **** Incremental Build of configuration Debug for project render ****
+Info: Internal Builder is used for build
+g++ -o render.exe CWaves.o Framework.o LoadOAL.o PlayStream.o aldlist.o "E:\\subband_aec\\Debug\\libsubband_aec.a" "..\\..\\eigens\\Debug\\libeigens.a" "C:\\Program Files\\Microsoft SDKs\\Windows\\v7.0\\Lib\\WinMM.Lib" "C:\\Program Files (x86)\\OpenAL 1.1 SDK\\libs\\Win64\\OpenAL32.lib" 
+
+16:52:04 Build Finished (took 4s.446ms)
+
